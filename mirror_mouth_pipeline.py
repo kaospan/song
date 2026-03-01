@@ -27,8 +27,18 @@ API_KEY = os.environ.get("API_KEY")
 if not API_KEY:
     raise ValueError("API_KEY environment variable not set")
 
+
+def masked_key(key):
+    if not key:
+        return ""
+    visible = min(4, len(key))
+    return key[:visible] + "*" * (len(key) - visible)
+
+
+print(f"Using API key: {masked_key(API_KEY)}")
+
 HEADERS = {
-    "Authorization": f"Bearer {API_KEY}"
+    "X-API-Key": API_KEY
 }
 
 PROMPT_TEXT = """Create a realistic close-up lip-synced performance using the provided reference image and provided audio segment.
