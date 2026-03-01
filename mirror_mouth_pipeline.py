@@ -83,16 +83,17 @@ During sustained notes, the mouth remains naturally open for the full duration o
 Jaw remains steady during long vowels.
 """
 
-SEGMENT_LENGTH_SECONDS = 8
-OUTPUT_AUDIO_FOLDER = "segments"
-OUTPUT_VIDEO_FOLDER = "video_segments"
-FINAL_VIDEO_NAME = "final_music_video.mp4"
-API_BASE = "https://api.hedra.com/web-app/public"
-API_URL = "https://api.hedra.com/web-app/public"
-API_KEY = os.environ.get("API_KEY")
-HEADERS = {
-    "Authorization": f"Bearer {API_KEY}"
-}
+# =====================================================
+# VALIDATE INPUTS
+# =====================================================
+
+if not os.path.isfile(INPUT_MP3):
+    raise FileNotFoundError(f"Input audio file not found: {INPUT_MP3}")
+
+if not os.path.isfile(REFERENCE_IMAGE):
+    raise FileNotFoundError(f"Reference image not found: {REFERENCE_IMAGE}")
+
+print(f"Inputs validated: {INPUT_MP3}, {REFERENCE_IMAGE}")
 
 # =====================================================
 # CREATE FOLDERS
@@ -139,7 +140,8 @@ for idx, audio_file in enumerate(audio_files):
         img_upload = requests.post(
             f"{API_BASE}/assets",
             headers=HEADERS,
-            files={"file": ("image.png", img, "image/png")}
+            files={"file": ("image.png", img, "image/png")},
+            timeout=60
         )
 
     img_upload.raise_for_status()
@@ -151,7 +153,8 @@ for idx, audio_file in enumerate(audio_files):
         audio_upload = requests.post(
             f"{API_BASE}/assets",
             headers=HEADERS,
-            files={"file": ("audio.mp3", aud, "audio/mpeg")}
+            files={"file": ("audio.mp3", aud, "audio/mpeg")},
+            timeout=60
         )
 
     audio_upload.raise_for_status()
@@ -173,7 +176,8 @@ for idx, audio_file in enumerate(audio_files):
                 "aspect_ratio": "9:16",
                 "resolution": "720p"
             }
-        }
+        },
+        timeout=60
     )
 
     generation_response.raise_for_status()
@@ -190,7 +194,8 @@ for idx, audio_file in enumerate(audio_files):
     while True:
         status_response = requests.get(
             f"{API_BASE}/generations/{job_id}",
-            headers=HEADERS
+            headers=HEADERS,
+            timeout=30
         )
 
         status_response.raise_for_status()
@@ -214,11 +219,12 @@ for idx, audio_file in enumerate(audio_files):
 
     print("Downloading video...")
 
-    video_data = requests.get(video_url).content
     video_path = os.path.join(OUTPUT_VIDEO_FOLDER, f"video_{idx:03}.mp4")
-
-    with open(video_path, "wb") as f:
-        f.write(video_data)
+    with requests.get(video_url, stream=True, timeout=120) as video_resp:
+        video_resp.raise_for_status()
+        with open(video_path, "wb") as f:
+            for chunk in video_resp.iter_content(chunk_size=8192):
+                f.write(chunk)
 
     video_files.append(video_path)
 
@@ -249,26 +255,3 @@ subprocess.run([
 
 print("\nDONE. Final video created:", FINAL_VIDEO_NAME)
 
-
-# # =============================
-# STITCH VIDEOS
-# =============================
-
-print("Stitching final video...")
-
-with open("videos.txt", "w") as f:
-    for v in video_files:
-        f.write(f"file '{os.path.abspath(v)}'\n")
-
-subprocess.run([
-    "ffmpeg",
-    "-f", "concat",
-    "-safe", "0",
-    "-i", "videos.txt",
-    "-c", "copy",
-    FINAL_VIDEO_NAME
-])
-
-print("DONE.")
-
-    
