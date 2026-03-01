@@ -244,14 +244,19 @@ with open("videos.txt", "w") as f:
     for video in video_files:
         f.write(f"file '{os.path.abspath(video)}'\n")
 
+# Re-encode to H.264/AAC to normalize codecs and avoid concat copy issues.
 subprocess.run([
     "ffmpeg",
     "-f", "concat",
     "-safe", "0",
     "-i", "videos.txt",
-    "-c", "copy",
+    "-c:v", "libx264",
+    "-crf", "23",
+    "-preset", "medium",
+    "-c:a", "aac",
+    "-b:a", "128k",
     FINAL_VIDEO_NAME
-])
+], check=True)
 
 print("\nDONE. Final video created:", FINAL_VIDEO_NAME)
 
