@@ -25,17 +25,80 @@ API_BASE = "https://api.hedra.com/web-app/public"
 API_KEY = os.environ.get("API_KEY")
 
 def masked_key(key):
- if not key:
- return "<empty>"
- return f"{key[:4]}...{key[-4:]}"
+    """Return a partially-masked key string safe for diagnostic output."""
+    if not key:
+        return "<empty>"
+    if len(key) < 8:
+        return "<too short>"
+    return f"{key[:4]}...{key[-4:]}"
 
 if not API_KEY:
     raise ValueError("API_KEY environment variable not set")
 
+print(f"[config] API_KEY loaded: {masked_key(API_KEY)}")
+
 HEADERS = {
- "Authorization": f"Bearer {API_KEY}", # optional
- "X-API-Key": API_KEY # required by Hedra API
+    "X-API-Key": API_KEY,          # required by Hedra API
+    "Authorization": f"Bearer {API_KEY}",  # optional fallback
 }
+
+# =====================================================
+# UPLOAD HELPERS  (Hedra two-step asset upload)
+# =====================================================
+
+def _initiate_upload(filename: str, media_type: str) -> tuple:
+    """Step 1: ask Hedra for a pre-signed upload URL.
+
+    Returns (asset_id, upload_url).
+    """
+    resp = requests.post(
+        f"{API_BASE}/assets",
+        headers={**HEADERS, "Content-Type": "application/json"},
+        json={"file_name": filename, "media_type": media_type},
+        timeout=30,
+    )
+    print(f"  [init_upload] status={resp.status_code}")
+    resp.raise_for_status()
+    data = resp.json()
+    asset_id = data.get("id")
+    upload_url = data.get("upload_url") or data.get("signed_url")
+    missing = [f for f, v in [("id", asset_id), ("upload_url/signed_url", upload_url)] if not v]
+    if missing:
+        raise ValueError(f"Upload-init response missing fields {missing}; keys present: {list(data.keys())}")
+    return asset_id, upload_url
+
+
+def _put_to_signed_url(upload_url: str, file_path: str, media_type: str) -> None:
+    """Step 2: PUT the raw file bytes to the pre-signed URL."""
+    file_size = os.path.getsize(file_path)
+    print(f"  [put_upload] uploading {os.path.basename(file_path)} "
+          f"({file_size} bytes) to signed URL…")
+    with open(file_path, "rb") as fh:
+        resp = requests.put(
+            upload_url,
+            data=fh,
+            headers={"Content-Type": media_type, "Content-Length": str(file_size)},
+            timeout=120,
+        )
+    print(f"  [put_upload] status={resp.status_code}")
+    resp.raise_for_status()
+
+
+def upload_asset(file_path: str, media_type: str) -> str:
+    """Two-step Hedra asset upload.
+
+    1. POST /assets (JSON) → pre-signed URL + asset ID
+    2. PUT file bytes to the pre-signed URL
+
+    Returns the asset ID string.
+    """
+    filename = os.path.basename(file_path)
+    print(f"  [upload_asset] initiating upload: {filename} ({media_type})")
+    asset_id, upload_url = _initiate_upload(filename, media_type)
+    print(f"  [upload_asset] asset_id={asset_id}")
+    _put_to_signed_url(upload_url, file_path, media_type)
+    print(f"  [upload_asset] upload complete: {filename} → {asset_id}")
+    return asset_id
 
 PROMPT_TEXT = """Create a realistic close-up lip-synced performance using the provided reference image and provided audio segment.
 
@@ -141,30 +204,12 @@ video_files = []
 for idx, audio_file in enumerate(audio_files):
     print(f"\nProcessing segment {idx+1}/{len(audio_files)}")
 
-    # ---- Upload Image ----
-    with open(REFERENCE_IMAGE, "rb") as img:
-        img_upload = requests.post(
-            f"{API_BASE}/assets",
-            headers=HEADERS,
-            files={"file": ("image.png", img, "image/png")},
-            timeout=60
-        )
-
-    img_upload.raise_for_status()
-    image_id = img_upload.json().get("id")
+    # ---- Upload Image (two-step) ----
+    image_id = upload_asset(REFERENCE_IMAGE, "image/png")
     print("Image uploaded:", image_id)
 
-    # ---- Upload Audio ----
-    with open(audio_file, "rb") as aud:
-        audio_upload = requests.post(
-            f"{API_BASE}/assets",
-            headers=HEADERS,
-            files={"file": ("audio.mp3", aud, "audio/mpeg")},
-            timeout=60
-        )
-
-    audio_upload.raise_for_status()
-    audio_id = audio_upload.json().get("id")
+    # ---- Upload Audio (two-step) ----
+    audio_id = upload_asset(audio_file, "audio/mpeg")
     print("Audio uploaded:", audio_id)
 
     # ---- Start Generation ----
