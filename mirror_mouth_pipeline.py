@@ -22,15 +22,15 @@ FINAL_VIDEO_NAME = "final_music_video.mp4"
 API_BASE = "https://api.hedra.com/web-app/public"
 
 # Use environment variable for security
+
 API_KEY = os.environ.get("API_KEY")
+if not API_KEY:
+    raise ValueError("API_KEY environment variable not set")
 
 def masked_key(key):
  if not key:
- return "<empty>"
+     return "<empty>"
  return f"{key[:4]}...{key[-4:]}"
-
-if not API_KEY:
-    raise ValueError("API_KEY environment variable not set")
 
 HEADERS = {
  "Authorization": f"Bearer {API_KEY}", # optional
