@@ -24,11 +24,17 @@ API_BASE = "https://api.hedra.com/web-app/public"
 # Use environment variable for security
 API_KEY = os.environ.get("API_KEY")
 
+def masked_key(key):
+ if not key:
+ return "<empty>"
+ return f"{key[:4]}...{key[-4:]}"
+
 if not API_KEY:
     raise ValueError("API_KEY environment variable not set")
 
 HEADERS = {
-    "Authorization": f"Bearer {API_KEY}"
+ "Authorization": f"Bearer {API_KEY}", # optional
+ "X-API-Key": API_KEY # required by Hedra API
 }
 
 PROMPT_TEXT = """Create a realistic close-up lip-synced performance using the provided reference image and provided audio segment.
