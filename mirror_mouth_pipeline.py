@@ -246,7 +246,9 @@ for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
 
     print("Generation started. Job ID:", job_id)
 
-    # ---- Poll Until Completed ----
+    # Poll status
+    status_url = f"{API_BASE}/generations/{job_id}/status"
+
     while True:
         status_response = requests.get(
             f"{API_BASE}/generations/{job_id}",
@@ -259,15 +261,21 @@ for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
         status = status_json.get("status")
         print("Status:", status)
 
-        if status == "completed":
+        if status == "complete":
             break
-        elif status in ["failed", "error"]:
-            raise Exception(f"Generation failed: {status_json}")
+        if status == "error":
+            raise Exception(f"Generation failed: {json.dumps(status_json, indent=2)}")
 
         time.sleep(10)
 
-    # ---- Download Video ----
-    video_url = status_json.get("output", {}).get("video_url")
+    # Download video
+    output = status_json.get("output", {})
+    video_url = (
+        output.get("video_url")
+        or status_json.get("download_url")
+        or status_json.get("url")
+        or status_json.get("streaming_url")
+    )
 
     if not video_url:
         raise Exception(f"No video URL returned: {status_json}")
