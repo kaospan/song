@@ -6,14 +6,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 function App() {
   const [songFile, setSongFile] = useState(null)
   const [imageFile, setImageFile] = useState(null)
-  const [songTitle, setSongTitle] = useState('')
-  const [songArtist, setSongArtist] = useState('')
   const [job, setJob] = useState(null)
-  const [defaultModelName, setDefaultModelName] = useState('')
-  const [availableModels, setAvailableModels] = useState([])
-  const [modelName, setModelName] = useState('')
-  const [videoStyles, setVideoStyles] = useState([])
-  const [videoStyle, setVideoStyle] = useState('cinematic_studio')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -21,55 +14,6 @@ function App() {
     if (!imageFile) return ''
     return URL.createObjectURL(imageFile)
   }, [imageFile])
-
-  useEffect(() => {
-    let isMounted = true
-
-    async function loadConfig() {
-      try {
-        const response = await fetch(`${API_BASE}/api/config`)
-        const payload = await response.json()
-        if (!response.ok) {
-          throw new Error(payload.detail || 'Unable to load backend config.')
-        }
-        if (isMounted) {
-          setDefaultModelName(payload.default_model_name ?? '')
-          setModelName(payload.default_model_name ?? '')
-          setVideoStyles(payload.video_styles ?? [])
-          setVideoStyle(payload.default_video_style ?? 'cinematic_studio')
-        }
-      } catch (configError) {
-        if (isMounted) {
-          setError(configError.message)
-        }
-      }
-    }
-
-    loadConfig()
-
-    async function loadModels() {
-      try {
-        const response = await fetch(`${API_BASE}/api/models`)
-        const payload = await response.json()
-        if (!response.ok) {
-          throw new Error(payload.detail || 'Unable to load models.')
-        }
-        if (isMounted) {
-          setAvailableModels(payload.models ?? [])
-        }
-      } catch (modelError) {
-        if (isMounted) {
-          setError(modelError.message)
-        }
-      }
-    }
-
-    loadModels()
-
-    return () => {
-      isMounted = false
-    }
-  }, [])
 
   useEffect(() => {
     return () => {
@@ -117,10 +61,6 @@ function App() {
       const formData = new FormData()
       formData.append('song', songFile)
       formData.append('image', imageFile)
-      formData.append('song_title', songTitle.trim())
-      formData.append('song_artist', songArtist.trim())
-      formData.append('model_name', modelName || defaultModelName)
-      formData.append('video_style', videoStyle)
 
       const response = await fetch(`${API_BASE}/api/jobs`, {
         method: 'POST',
@@ -146,11 +86,11 @@ function App() {
     <main className="app-shell">
       <section className="hero-panel">
         <p className="eyebrow">Mirror Mouth Studio</p>
-        <h1>Turn a portrait and a track into a cinematic, lip‑synced performance.</h1>
+        <h1>Turn one still image and one song into a full lip-synced video.</h1>
         <p className="hero-copy">
-          Upload a reference image and your mastered audio. The system segments the track,
-          renders each performance beat, and delivers a single stitched vertical video ready
-          for release.
+          Upload the master track and reference portrait. The pipeline splits the song,
+          generates timestamped segment runs, and returns one stitched vertical video using
+          Kling V3.
         </p>
       </section>
 
@@ -158,11 +98,11 @@ function App() {
         <form className="upload-panel" onSubmit={handleSubmit}>
           <div className="panel-header">
             <h2>Inputs</h2>
-            <span className="chip">Model: {defaultModelName || 'Loading...'}</span>
+            <span className="chip">Model: Kling V3 Standard I2V</span>
           </div>
 
           <label className="field-card">
-            <span className="field-label">Audio file</span>
+            <span className="field-label">Song file</span>
             <input
               accept="audio/*,.mp3,.wav,.m4a"
               type="file"
@@ -172,51 +112,7 @@ function App() {
           </label>
 
           <label className="field-card">
-            <span className="field-label">Track title</span>
-            <input
-              placeholder="Enter the track title"
-              type="text"
-              value={songTitle}
-              onChange={(event) => setSongTitle(event.target.value)}
-            />
-          </label>
-
-          <label className="field-card">
-            <span className="field-label">Artist / Performer</span>
-            <input
-              placeholder="Enter the artist or performer name"
-              type="text"
-              value={songArtist}
-              onChange={(event) => setSongArtist(event.target.value)}
-            />
-          </label>
-
-          <label className="field-card">
-            <span className="field-label">Video concept</span>
-            <select value={videoStyle} onChange={(event) => setVideoStyle(event.target.value)}>
-              {(videoStyles.length ? videoStyles : [{ value: 'cinematic_studio', label: 'Cinematic Studio' }]).map(
-                (style) => (
-                  <option key={style.value} value={style.value}>
-                    {style.label}
-                  </option>
-                )
-              )}
-            </select>
-          </label>
-
-          <label className="field-card">
-            <span className="field-label">Render model</span>
-            <select value={modelName} onChange={(event) => setModelName(event.target.value)}>
-              {(availableModels.length ? availableModels : [defaultModelName || 'Loading...']).map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="field-card">
-            <span className="field-label">Reference image</span>
+            <span className="field-label">Still image</span>
             <input
               accept="image/*,.png,.jpg,.jpeg,.webp"
               type="file"
@@ -226,7 +122,7 @@ function App() {
           </label>
 
           <button className="launch-button" disabled={isSubmitting} type="submit">
-            {isSubmitting ? 'Starting render...' : 'Generate performance video'}
+            {isSubmitting ? 'Starting job...' : 'Generate full video'}
           </button>
 
           {error ? <p className="error-text">{error}</p> : null}
@@ -242,19 +138,8 @@ function App() {
 
           <p className="status-copy">
             {job?.message ??
-              'Launch a render to upload assets, generate segments, and stitch the final performance cut.'}
+              'Start a job to upload assets, generate segments, and stitch the final music video.'}
           </p>
-
-          {job ? (
-            <div className="reuse-flags">
-              <span className={`reuse-pill ${job.reused_cached_audio ? 'on' : 'off'}`}>
-                {job.reused_cached_audio ? 'Reused cached audio' : 'Fresh audio split'}
-              </span>
-              <span className={`reuse-pill ${job.reused_image_asset ? 'on' : 'off'}`}>
-                {job.reused_image_asset ? 'Reused image asset' : 'Uploaded new image'}
-              </span>
-            </div>
-          ) : null}
 
           {job?.id ? (
             <dl className="meta-grid">
@@ -263,23 +148,7 @@ function App() {
                 <dd>{job.id}</dd>
               </div>
               <div>
-                <dt>Title</dt>
-                <dd>{job.song_title || songTitle || 'Untitled'}</dd>
-              </div>
-              <div>
-                <dt>Artist</dt>
-                <dd>{job.song_artist || songArtist || 'Unknown'}</dd>
-              </div>
-              <div>
-                <dt>Video type</dt>
-                <dd>{job.video_style || videoStyle}</dd>
-              </div>
-              <div>
-                <dt>Model</dt>
-                <dd>{job.model_name || modelName || defaultModelName}</dd>
-              </div>
-              <div>
-                <dt>Audio</dt>
+                <dt>Song</dt>
                 <dd>{job.audio_filename}</dd>
               </div>
               <div>
@@ -306,7 +175,7 @@ function App() {
           <h2>Output</h2>
           {videoUrl ? (
             <a className="download-link" href={videoUrl}>
-              Download final MP4
+              Download MP4
             </a>
           ) : null}
         </div>
@@ -315,7 +184,7 @@ function App() {
           <video className="result-video" controls src={videoUrl} />
         ) : (
           <div className="video-placeholder">
-            The final performance cut will appear here once rendering completes.
+            The final video player appears here when the backend marks the job complete.
           </div>
         )}
       </section>

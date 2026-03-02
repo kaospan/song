@@ -202,11 +202,6 @@ cython_debug/
 .cursorindexingignore
 job_runs/
 client/dist/
-segments/
-video_segments/
-final_videos/
-final_music_video*.mp4
-videos.txt
 
 # Marimo
 marimo/_static/
