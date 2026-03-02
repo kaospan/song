@@ -4,6 +4,7 @@ import math
 import time
 import requests
 import subprocess
+from datetime import datetime
 from tqdm import tqdm
 from dotenv import load_dotenv
 
@@ -70,6 +71,8 @@ SEGMENT_LENGTH_SECONDS = 8
 OUTPUT_AUDIO_FOLDER = "segments"
 OUTPUT_VIDEO_FOLDER = "video_segments"
 FINAL_VIDEO_NAME = "final_music_video.mp4"
+PROMPT_FILE = normalize_env_path(os.environ.get("PROMPT_FILE")) or "mirror_mouth_prompt.txt"
+HEDRA_MODEL_NAME = os.environ.get("HEDRA_MODEL_NAME", "Kling V3 Standard I2V").strip()
 
 API_BASE = "https://api.hedra.com/web-app/public"
 
@@ -83,68 +86,108 @@ HEADERS = {
     "Authorization": f"Bearer {API_KEY}"
 }
 
-PROMPT_TEXT = """Create a realistic close-up lip-synced performance using the provided reference image and provided audio segment.
+# =====================================================
+# HELPERS
+# =====================================================
 
-STYLE:
-Dark cinematic tone.
-Very dark background.
-High-contrast lighting with a single strong key light from camera-left.
-Opposite side in deep shadow.
-Cool subtle blue tint in shadows.
-Lighting remains stable and unchanging from first frame to last frame.
 
-CAMERA:
-True locked tripod close-up.
-No zoom.
-No push-in.
-No crop.
-No reframing.
-No auto-centering.
-Subject size remains constant.
-Framing matches the reference image exactly.
+def raise_with_body(resp: requests.Response):
+    try:
+        body = resp.text
+    except Exception:
+        body = "<unreadable body>"
+    print(f"Request failed: {resp.status_code} {body}")
+    resp.raise_for_status()
 
-VISUAL ELEMENT:
-A vertical luminous seam divides the face down the center.
-The seam is a fixed visual design element.
-It remains constant in brightness, thickness, and position.
-No fading.
-No pulsing.
-No brightness changes.
 
-The left eye contains a subtle steady internal glow.
-The glow remains constant and stable.
-No flicker.
-No activation.
-No intensity change.
+def load_prompt_text(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Prompt file not found: {path}")
 
-FACIAL EXPRESSION:
-Left half: calm, serious, minimal expression.
-Right half: slightly more expressive but still controlled.
-No smiling.
-No exaggerated asymmetry.
-No dramatic emotional spikes.
+    with open(path, "r", encoding="utf-8") as f:
+        prompt_text = f.read().strip()
 
-PERFORMANCE:
-Highly accurate lip sync driven strictly by the audio.
-Natural vowel articulation.
-Minimal head movement.
-Natural blinking.
-Controlled breathing.
+    if not prompt_text:
+        raise ValueError(f"Prompt file is empty: {path}")
 
-During sustained notes, the mouth remains naturally open for the full duration of the note and closes only when the audio ends.
-Jaw remains steady during long vowels.
-"""
+    return prompt_text
 
-SEGMENT_LENGTH_SECONDS = 8
-OUTPUT_AUDIO_FOLDER = "segments"
-OUTPUT_VIDEO_FOLDER = "video_segments"
-FINAL_VIDEO_NAME = "final_music_video.mp4"
-API_BASE = "https://api.hedra.com/web-app/public"
-API_URL = "https://api.hedra.com/web-app/public"
-API_KEY = os.environ.get("API_KEY")
-HEADERS = {
-    "Authorization": f"Bearer {API_KEY}"
-}
+
+def resolve_model_id(model_name):
+    url = f"{API_BASE}/models"
+    resp = requests.get(url, headers=HEADERS, timeout=30)
+    if not resp.ok:
+        raise_with_body(resp)
+
+    models = resp.json()
+    normalized_name = model_name.strip().lower()
+
+    for model in models:
+        if str(model.get("name", "")).strip().lower() == normalized_name:
+            return model["id"]
+
+    available_names = ", ".join(sorted(model.get("name", "<unnamed>") for model in models))
+    raise ValueError(
+        f"HEDRA_MODEL_NAME '{model_name}' not found. Available models: {available_names}"
+    )
+
+
+def create_asset_record(name, type_="image"):
+    url = f"{API_BASE}/assets"
+    payload = {"name": name, "type": type_}
+    headers = {**HEADERS, "Content-Type": "application/json"}
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    if not resp.ok:
+        raise_with_body(resp)
+
+    return resp.json()
+
+
+def upload_file_to_asset(asset_id, path, mime="application/octet-stream"):
+    url = f"{API_BASE}/assets/{asset_id}/upload"
+
+    with open(path, "rb") as f:
+        files = {"file": (os.path.basename(path), f, mime)}
+        resp = requests.post(url, headers=HEADERS, files=files, timeout=120)
+
+    if not resp.ok:
+        raise_with_body(resp)
+
+    return resp.json()
+
+
+def upload_asset(path, name=None, mime=None, type_="image"):
+    name = name or os.path.basename(path)
+
+    if mime is None:
+        if type_ == "image":
+            mime = "image/png"
+        elif type_ == "audio":
+            mime = "audio/mpeg"
+        else:
+            mime = "application/octet-stream"
+
+    print(f"Creating asset record for: {name}")
+    asset_resp = create_asset_record(name, type_=type_)
+    asset_id = asset_resp.get("id")
+    upload_url = asset_resp.get("upload_url")
+
+    if not asset_id:
+        raise Exception(f"No asset id returned: {asset_resp}")
+
+    if upload_url:
+        print(f"Uploading to presigned URL for asset {asset_id}")
+        with open(path, "rb") as f:
+            put_resp = requests.put(upload_url, data=f, timeout=120)
+        if not put_resp.ok:
+            raise_with_body(put_resp)
+    else:
+        print(f"Uploading via Hedra endpoint for asset {asset_id}")
+        upload_file_to_asset(asset_id, path, mime=mime)
+
+    return asset_id
+
 
 # =====================================================
 # CREATE FOLDERS
@@ -153,9 +196,12 @@ HEADERS = {
 os.makedirs(OUTPUT_AUDIO_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_VIDEO_FOLDER, exist_ok=True)
 
-# =====================================================
-# SPLIT AUDIO
-# =====================================================
+session_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+session_video_folder = os.path.join(OUTPUT_VIDEO_FOLDER, session_timestamp)
+os.makedirs(session_video_folder, exist_ok=True)
+videos_manifest_path = os.path.join(session_video_folder, "videos.txt")
+
+print("Session video folder:", session_video_folder)
 
 print("Splitting audio...")
 
@@ -179,6 +225,11 @@ print(f"{len(audio_files)} segments created.")
 # PROCESS EACH SEGMENT SEQUENTIALLY
 # =====================================================
 
+prompt_text = load_prompt_text(PROMPT_FILE)
+model_id = resolve_model_id(HEDRA_MODEL_NAME)
+print("Using prompt file:", PROMPT_FILE)
+print("Using model:", HEDRA_MODEL_NAME, model_id)
+
 video_files = []
 
 for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
@@ -197,9 +248,9 @@ for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
         "type": "video",
         "start_keyframe_id": image_asset_id,
         "audio_id": audio_asset_id,
-        "ai_model_id": "d1dd37a3-e39a-4854-a298-6510289f9cf2",
+        "ai_model_id": model_id,
         "generated_video_inputs": {
-            "text_prompt": PROMPT_TEXT,
+            "text_prompt": prompt_text,
             "duration_ms": audio_duration_ms,
             "aspect_ratio": "9:16",
             "resolution": "720p",
@@ -278,7 +329,9 @@ for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
     )
 
     if not video_url:
-        raise Exception(f"No video URL returned: {status_json}")
+        raise Exception("No video_url returned")
+
+    video_path = os.path.join(session_video_folder, f"video_{idx:03}.mp4")
 
     print("Downloading video...")
 
@@ -302,40 +355,31 @@ for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
 
 print("\nStitching final video...")
 
-with open("videos.txt", "w") as f:
-    for video in video_files:
-        f.write(f"file '{os.path.abspath(video)}'\n")
-
-subprocess.run([
-    "ffmpeg",
-    "-f", "concat",
-    "-safe", "0",
-    "-i", "videos.txt",
-    "-c", "copy",
-    FINAL_VIDEO_NAME
-])
-
-print("\nDONE. Final video created:", FINAL_VIDEO_NAME)
-
-
-# # =============================
-# STITCH VIDEOS
-# =============================
-
-print("Stitching final video...")
-
-with open("videos.txt", "w") as f:
+with open(videos_manifest_path, "w") as f:
     for v in video_files:
         f.write(f"file '{os.path.abspath(v)}'\n")
 
-subprocess.run([
-    "ffmpeg",
-    "-f", "concat",
-    "-safe", "0",
-    "-i", "videos.txt",
-    "-c", "copy",
-    FINAL_VIDEO_NAME
-])
+ffmpeg_bin = FFMPEG_PATH or "ffmpeg"
+ffmpeg_cmd = [
+    ffmpeg_bin,
+    "-f",
+    "concat",
+    "-safe",
+    "0",
+    "-i",
+    videos_manifest_path,
+    "-c:v",
+    "libx264",
+    "-crf",
+    "23",
+    "-preset",
+    "medium",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "128k",
+    FINAL_VIDEO_NAME,
+]
 
 print("DONE.")
 
