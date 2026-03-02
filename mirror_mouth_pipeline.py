@@ -1,7 +1,9 @@
 
+#!/usr/bin/env python3
 import os
 import math
 import time
+import json
 import requests
 import subprocess
 from pydub import AudioSegment
@@ -22,19 +24,13 @@ FINAL_VIDEO_NAME = "final_music_video.mp4"
 API_BASE = "https://api.hedra.com/web-app/public"
 
 # Use environment variable for security
-
 API_KEY = os.environ.get("API_KEY")
 if not API_KEY:
-    raise ValueError("API_KEY environment variable not set")
-
-def masked_key(key):
- if not key:
-     return "<empty>"
- return f"{key[:4]}...{key[-4:]}"
+ raise ValueError("API_KEY environment variable not set")
 
 HEADERS = {
- "Authorization": f"Bearer {API_KEY}", # optional
- "X-API-Key": API_KEY # required by Hedra API
+ "X-API-Key": API_KEY,
+ "Authorization": f"Bearer {API_KEY}", # optional but harmless
 }
 
 PROMPT_TEXT = """Create a realistic close-up lip-synced performance using the provided reference image and provided audio segment.
@@ -93,176 +89,199 @@ Jaw remains steady during long vowels.
 # VALIDATE INPUTS
 # =====================================================
 
-if not os.path.isfile(INPUT_MP3):
-    raise FileNotFoundError(f"Input audio file not found: {INPUT_MP3}")
+def masked_key(key: str) -> str:
+ if not key:
+ return "<empty>"
+ return f"{key[:4]}...{key[-4:]}"
 
-if not os.path.isfile(REFERENCE_IMAGE):
-    raise FileNotFoundError(f"Reference image not found: {REFERENCE_IMAGE}")
+def raise_with_body(resp: requests.Response) -> None:
+ """Print body for diagnostics and raise for non-2xx responses."""
+ try:
+ body = resp.text
+ except Exception:
+ body = "<unreadable body>"
+ print(f"Request failed: status={resp.status_code}, body={body}")
+ resp.raise_for_status()
 
-print(f"Inputs validated: {INPUT_MP3}, {REFERENCE_IMAGE}")
+def raise_with_body(resp):
+ # Print helpful diagnostics then raise
+ try:
+ body = resp.text
+ except Exception:
+ body = "<unreadable body>"
+ print(f"Request failed: {resp.status_code} {body}")
+ resp.raise_for_status()
 
-# =====================================================
-# CREATE FOLDERS
-# =====================================================
+def create_asset_record(name, type="image"):
+ url = f"{API_BASE}/assets"
+ payload = {"name": name, "type": type}
+ headers = {HEADERS, "Content-Type": "application/json"}
+ resp = requests.post(url, headers=headers, json=payload, timeout=30)
+ if not resp.ok:
+ raise_with_body(resp)
+ return resp.json()
 
-os.makedirs(OUTPUT_AUDIO_FOLDER, exist_ok=True)
-os.makedirs(OUTPUT_VIDEO_FOLDER, exist_ok=True)
+def upload_file_to_asset(asset_id, path, mime="application/octet-stream"):
+ url = f"{API_BASE}/assets/{asset_id}/upload"
+ with open(path, "rb") as f:
+ files = {"file": (os.path.basename(path), f, mime)}
+ resp = requests.post(url, headers=HEADERS, files=files, timeout=120)
+ if not resp.ok:
+ raise_with_body(resp)
+ return resp.json()
 
-# =====================================================
-# SPLIT AUDIO
-# =====================================================
+def upload_asset(path, name=None, mime=None, type="image"):
+ name = name or os.path.basename(path)
+ mime = mime or ("image/png" if type == "image" else "application/octet-stream")
+
+ print(f"Creating asset record for: {name}")
+asset_resp = create_asset_record(name, type_=type_)
+asset_id = asset_resp.get("id")
+upload_url = asset_resp.get("upload_url")
+
+if not asset_id:
+    raise Exception(f"No asset id returned from create_asset_record: {asset_resp}")
+
+if upload_url:
+    # server provided a presigned upload URL: PUT the bytes there
+    print(f"Uploading to presigned URL for asset {asset_id}")
+    with open(path, "rb") as f:
+        put_resp = requests.put(upload_url, data=f, timeout=120)
+    if not put_resp.ok:
+        print("Presigned upload failed:", put_resp.status_code, put_resp.text)
+        put_resp.raise_for_status()
+else:
+    print(f"Uploading file to Hedra upload endpoint for asset {asset_id}")
+    upload_resp = upload_file_to_asset(asset_id, path, mime=mime)
+    print("Upload response:", json.dumps(upload_resp, indent=2))
+
+return asset_id
 
 print("Splitting audio...")
-
 audio = AudioSegment.from_mp3(INPUT_MP3)
 duration_ms = len(audio)
 segment_length_ms = SEGMENT_LENGTH_SECONDS * 1000
 num_segments = math.ceil(duration_ms / segment_length_ms)
 
 audio_files = []
-
 for i in range(num_segments):
-    start = i * segment_length_ms
-    end = min((i + 1) * segment_length_ms, duration_ms)
-    segment = audio[start:end]
+ start = i * segment_length_ms
+ end = min((i + 1) * segment_length_ms, duration_ms)
+ segment = audio[start:end]
+ filename = os.path.join(OUTPUT_AUDIO_FOLDER, f"segment{i:03}.mp3")
+ segment.export(filename, format="mp3", bitrate="320k")
+ audio_files.append(filename)
 
-    filename = os.path.join(OUTPUT_AUDIO_FOLDER, f"segment_{i:03}.mp3")
-    segment.export(filename, format="mp3", bitrate="320k")
-    audio_files.append(filename)
+ print(f"{len(audio_files)} segments created.")
 
-print(f"{len(audio_files)} segments created.")
 
-# =====================================================
-# PROCESS EACH SEGMENT SEQUENTIALLY
-# =====================================================
+print("Uploading reference image (once)...")
+image_asset_id = upload_asset(REFERENCE_IMAGE, name=os.path.basename(REFERENCE_IMAGE), mime="image/png", type="image")
+print("Reference image asset id:", image_asset_id)
 
 video_files = []
 
 for idx, audio_file in enumerate(audio_files):
-    print(f"\nProcessing segment {idx+1}/{len(audio_files)}")
+ print(f"\nProcessing segment {idx + 1}/{len(audio_files)}")
 
-    # ---- Upload Image ----
-    with open(REFERENCE_IMAGE, "rb") as img:
-        img_upload = requests.post(
-            f"{API_BASE}/assets",
-            headers=HEADERS,
-            files={"file": ("image.png", img, "image/png")},
-            timeout=60
-        )
+ # Upload audio segment asset
+print("Uploading audio segment:", audio_file)
+audio_asset_id = upload_asset(audio_file, name=os.path.basename(audio_file), mime="audio/mpeg", type_="audio")
+print("Audio asset id:", audio_asset_id)
 
-    img_upload.raise_for_status()
-    image_id = img_upload.json().get("id")
-    print("Image uploaded:", image_id)
+# Prepare generation payload
+generation_payload = {
+    "type": "video",
+    "start_keyframe_id": image_asset_id,
+    "audio_id": audio_asset_id,
+    "reference_image_ids": [image_asset_id],
+    "ai_model_id": "d1dd37a3-e39a-4854-a298-6510289f9cf2",
+    "generated_video_inputs": {
+        "text_prompt": PROMPT_TEXT,
+        "duration_ms": SEGMENT_LENGTH_SECONDS * 1000,
+        "aspect_ratio": "9:16",
+        "resolution": "720p",
+    },
+}
 
-    # ---- Upload Audio ----
-    with open(audio_file, "rb") as aud:
-        audio_upload = requests.post(
-            f"{API_BASE}/assets",
-            headers=HEADERS,
-            files={"file": ("audio.mp3", aud, "audio/mpeg")},
-            timeout=60
-        )
+# Start generation
+print("Starting generation for segment", idx)
+gen_url = f"{API_BASE}/generations"
+resp = requests.post(gen_url, headers={**HEADERS, "Content-Type": "application/json"}, json=generation_payload, timeout=60)
+if not resp.ok:
+    _raise_with_body(resp)
+generation_data = resp.json()
+job_id = generation_data.get("id") or generation_data.get("generation_id")
+if not job_id:
+    raise Exception(f"No job_id returned: {generation_data}")
+print("Generation started. Job ID:", job_id)
 
-    audio_upload.raise_for_status()
-    audio_id = audio_upload.json().get("id")
-    print("Audio uploaded:", audio_id)
+# Polling
+status_url = f"{API_BASE}/generations/{job_id}"
+while True:
+    status_resp = requests.get(status_url, headers=HEADERS, timeout=30)
+    if not status_resp.ok:
+        _raise_with_body(status_resp)
+    status_json = status_resp.json()
+    status = status_json.get("status")
+    print("Status:", status)
+    if status == "completed":
+        break
+    if status in ("failed", "error"):
+        raise Exception(f"Generation failed: {json.dumps(status_json, indent=2)}")
+    time.sleep(10)
 
-    # ---- Start Generation ----
-    generation_response = requests.post(
-        f"{API_BASE}/generations",
-        headers={**HEADERS, "Content-Type": "application/json"},
-        json={
-            "start_keyframe_id": image_id,
-            "audio_id": audio_id,
-            "reference_image_ids": [image_id],
-            "ai_model_id": "d1dd37a3-e39a-4854-a298-6510289f9cf2",
-            "generated_video_inputs": {
-                "text_prompt": PROMPT_TEXT,
-                "duration_ms": SEGMENT_LENGTH_SECONDS * 1000,
-                "aspect_ratio": "9:16",
-                "resolution": "720p"
-            }
-        },
-        timeout=60
-    )
+# Download output video
+output = status_json.get("output", {}) or {}
+video_url = output.get("video_url")
+if not video_url:
+    raise Exception(f"No video_url returned in status response: {json.dumps(status_json, indent=2)}")
 
-    generation_response.raise_for_status()
-    generation_data = generation_response.json()
-
-    job_id = generation_data.get("id") or generation_data.get("generation_id")
-
-    if not job_id:
-        raise Exception(f"No job_id returned: {generation_data}")
-
-    print("Generation started. Job ID:", job_id)
-
-    # ---- Poll Until Completed ----
-    while True:
-        status_response = requests.get(
-            f"{API_BASE}/generations/{job_id}",
-            headers=HEADERS,
-            timeout=30
-        )
-
-        status_response.raise_for_status()
-        status_json = status_response.json()
-
-        status = status_json.get("status")
-        print("Status:", status)
-
-        if status == "completed":
-            break
-        elif status in ["failed", "error"]:
-            raise Exception(f"Generation failed: {status_json}")
-
-        time.sleep(10)
-
-    # ---- Download Video ----
-    video_url = status_json.get("output", {}).get("video_url")
-
-    if not video_url:
-        raise Exception(f"No video URL returned: {status_json}")
-
-    print("Downloading video...")
-
-    video_path = os.path.join(OUTPUT_VIDEO_FOLDER, f"video_{idx:03}.mp4")
-    with requests.get(video_url, stream=True, timeout=120) as video_resp:
-        video_resp.raise_for_status()
-        with open(video_path, "wb") as f:
-            for chunk in video_resp.iter_content(chunk_size=8192):
+print("Downloading video...")
+video_path = os.path.join(OUTPUT_VIDEO_FOLDER, f"video_{idx:03}.mp4")
+with requests.get(video_url, stream=True, timeout=120) as vid_resp:
+    if not vid_resp.ok:
+        _raise_with_body(vid_resp)
+    with open(video_path, "wb") as f:
+        for chunk in vid_resp.iter_content(chunk_size=8192):
+            if chunk:
                 f.write(chunk)
 
-    video_files.append(video_path)
+video_files.append(video_path)
+print("Segment saved:", video_path)
 
-    print("Segment saved:", video_path)
-
-    # ---- Rate Limit Buffer ----
-    print("Waiting 60 seconds to avoid rate limit...")
-    time.sleep(60)
-
-# =====================================================
-# STITCH FINAL VIDEO
-# =====================================================
+# Rate limit buffer
+print("Waiting 60 seconds to avoid rate limit...")
+time.sleep(60)
 
 print("\nStitching final video...")
 
 with open("videos.txt", "w") as f:
-    for video in video_files:
-        f.write(f"file '{os.path.abspath(video)}'\n")
+ for v in video_files:
+ f.write(f"file '{os.path.abspath(v)}'\n")
 
-# Re-encode to H.264/AAC to normalize codecs and avoid concat copy issues.
-subprocess.run([
+
+ffmpeg_cmd = [
     "ffmpeg",
-    "-f", "concat",
-    "-safe", "0",
-    "-i", "videos.txt",
-    "-c:v", "libx264",
-    "-crf", "23",
-    "-preset", "medium",
-    "-c:a", "aac",
-    "-b:a", "128k",
-    FINAL_VIDEO_NAME
-], check=True)
+    "-f",
+    "concat",
+    "-safe",
+    "0",
+    "-i",
+    "videos.txt",
+    "-c:v",
+    "libx264",
+    "-crf",
+    "23",
+    "-preset",
+    "medium",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "128k",
+    FINAL_VIDEO_NAME,
+]
+print("Running ffmpeg to create:", FINAL_VIDEO_NAME)
+subprocess.run(ffmpeg_cmd, check=True)
 
 print("\nDONE. Final video created:", FINAL_VIDEO_NAME)
-
