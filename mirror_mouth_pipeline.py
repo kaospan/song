@@ -4,8 +4,60 @@ import math
 import time
 import requests
 import subprocess
-from pydub import AudioSegment
 from tqdm import tqdm
+from dotenv import load_dotenv
+
+# =====================================================
+# ENV
+# =====================================================
+
+# Load repo-root .env first, then prefer .venv/.env if present
+load_dotenv()
+load_dotenv(os.path.join(".venv", ".env"), override=True)
+
+# Repair Windows backslash paths that were quoted in .env and parsed with escapes.
+def normalize_env_path(value):
+    if not value:
+        return None
+
+    value = value.strip().strip('"').strip("'")
+    escape_map = str.maketrans(
+        {
+            "\a": r"\a",
+            "\b": r"\b",
+            "\f": r"\f",
+            "\n": r"\n",
+            "\r": r"\r",
+            "\t": r"\t",
+            "\v": r"\v",
+        }
+    )
+    value = value.translate(escape_map)
+    return os.path.normpath(value)
+
+
+def prepend_tool_dir_to_path(*tool_paths):
+    tool_dirs = []
+    for tool_path in tool_paths:
+        if tool_path and os.path.exists(tool_path):
+            tool_dir = os.path.dirname(tool_path)
+            if tool_dir and tool_dir not in tool_dirs:
+                tool_dirs.append(tool_dir)
+
+    if tool_dirs:
+        current_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = os.pathsep.join(tool_dirs + [current_path])
+
+
+# Configure ffmpeg/ffprobe paths for pydub if provided
+FFMPEG_PATH = normalize_env_path(os.environ.get("FFMPEG_PATH"))
+FFPROBE_PATH = normalize_env_path(os.environ.get("FFPROBE_PATH"))
+prepend_tool_dir_to_path(FFMPEG_PATH, FFPROBE_PATH)
+from pydub import AudioSegment
+
+if FFMPEG_PATH:
+    AudioSegment.converter = FFMPEG_PATH
+    AudioSegment.ffmpeg = FFMPEG_PATH
 
 # =====================================================
 # CONFIG
@@ -119,9 +171,7 @@ for i in range(num_segments):
     end = min((i + 1) * segment_length_ms, duration_ms)
     segment = audio[start:end]
 
-    filename = os.path.join(OUTPUT_AUDIO_FOLDER, f"segment_{i:03}.mp3")
-    segment.export(filename, format="mp3", bitrate="320k")
-    audio_files.append(filename)
+    audio_files.append((filename, len(segment)))
 
 print(f"{len(audio_files)} segments created.")
 
@@ -131,8 +181,8 @@ print(f"{len(audio_files)} segments created.")
 
 video_files = []
 
-for idx, audio_file in enumerate(audio_files):
-    print(f"\nProcessing segment {idx+1}/{len(audio_files)}")
+for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
+    print(f"\nProcessing segment {idx + 1}/{len(audio_files)}")
 
     # ---- Upload Image ----
     with open(REFERENCE_IMAGE, "rb") as img:
@@ -142,9 +192,19 @@ for idx, audio_file in enumerate(audio_files):
             files={"file": ("image.png", img, "image/png")}
         )
 
-    img_upload.raise_for_status()
-    image_id = img_upload.json().get("id")
-    print("Image uploaded:", image_id)
+    # Prepare payload
+    generation_payload = {
+        "type": "video",
+        "start_keyframe_id": image_asset_id,
+        "audio_id": audio_asset_id,
+        "ai_model_id": "d1dd37a3-e39a-4854-a298-6510289f9cf2",
+        "generated_video_inputs": {
+            "text_prompt": PROMPT_TEXT,
+            "duration_ms": audio_duration_ms,
+            "aspect_ratio": "9:16",
+            "resolution": "720p",
+        },
+    }
 
     # ---- Upload Audio ----
     with open(audio_file, "rb") as aud:
