@@ -263,7 +263,7 @@ for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
 
         if status == "complete":
             break
-        if status == "error":
+        if status in ("failed", "error"):
             raise Exception(f"Generation failed: {json.dumps(status_json, indent=2)}")
 
         time.sleep(10)
