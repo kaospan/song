@@ -6,6 +6,7 @@ import requests
 import subprocess
 from pydub import AudioSegment
 from tqdm import tqdm
+from dotenv import load_dotenv
 
 # =====================================================
 # CONFIG
@@ -21,8 +22,17 @@ FINAL_VIDEO_NAME = "final_music_video.mp4"
 
 API_BASE = "https://api.hedra.com/web-app/public"
 
-# Use environment variable for security
+# Load environment variables from .env and fetch API key
+load_dotenv()
 API_KEY = os.environ.get("API_KEY")
+
+FFMPEG_PATH = os.environ.get("FFMPEG_PATH")
+FFPROBE_PATH = os.environ.get("FFPROBE_PATH")
+
+if FFMPEG_PATH:
+    AudioSegment.converter = FFMPEG_PATH
+if FFPROBE_PATH:
+    AudioSegment.ffprobe = FFPROBE_PATH
 
 if not API_KEY:
     raise ValueError("API_KEY environment variable not set")
@@ -31,7 +41,8 @@ HEADERS = {
     "Authorization": f"Bearer {API_KEY}"
 }
 
-PROMPT_TEXT = """Create a realistic close-up lip-synced performance using the provided reference image and provided audio segment.
+PROMPT_TEXT = """
+Create a realistic close-up lip-synced performance using the provided reference image and provided audio segment.
 
 STYLE:
 Dark cinematic tone.
