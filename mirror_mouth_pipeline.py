@@ -96,6 +96,15 @@ def get_headers(content_type=None):
     return headers
 
 
+def _is_presigned_s3_url(url):
+    from urllib.parse import urlparse, parse_qs
+    parsed = urlparse(url)
+    params = {k.lower(): v for k, v in parse_qs(parsed.query).items()}
+    presign_keys = {"x-amz-algorithm", "x-amz-signature", "x-amz-credential",
+                    "x-amz-security-token", "awsaccesskeyid", "signature"}
+    return bool(presign_keys & set(params.keys()))
+
+
 def raise_with_body(resp: requests.Response):
     try:
         body = resp.text
@@ -407,7 +416,8 @@ def run_pipeline(
         video_path = os.path.join(session_video_folder, f"video_{idx:03}.mp4")
 
         print("Downloading video...")
-        with requests.get(video_url, headers=get_headers(), stream=True, timeout=120) as vid_resp:
+        download_headers = {} if _is_presigned_s3_url(video_url) else get_headers()
+        with requests.get(video_url, headers=download_headers, stream=True, timeout=120) as vid_resp:
             if not vid_resp.ok:
                 raise_with_body(vid_resp)
 
