@@ -5,6 +5,7 @@ import time
 import json
 import requests
 import subprocess
+from datetime import datetime
 from tqdm import tqdm
 from dotenv import load_dotenv
 
@@ -71,6 +72,8 @@ SEGMENT_LENGTH_SECONDS = 8
 OUTPUT_AUDIO_FOLDER = "segments"
 OUTPUT_VIDEO_FOLDER = "video_segments"
 FINAL_VIDEO_NAME = "final_music_video.mp4"
+PROMPT_FILE = normalize_env_path(os.environ.get("PROMPT_FILE")) or "mirror_mouth_prompt.txt"
+HEDRA_MODEL_NAME = os.environ.get("HEDRA_MODEL_NAME", "Kling V3 Standard I2V").strip()
 
 API_BASE = "https://api.hedra.com/web-app/public"
 
@@ -85,58 +88,6 @@ HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
 }
 
-PROMPT_TEXT = """Create a realistic close-up lip-synced performance using the provided reference image and provided audio segment.
-
-STYLE:
-Dark cinematic tone.
-Very dark background.
-High-contrast lighting with a single strong key light from camera-left.
-Opposite side in deep shadow.
-Cool subtle blue tint in shadows.
-Lighting remains stable and unchanging from first frame to last frame.
-
-CAMERA:
-True locked tripod close-up.
-No zoom.
-No push-in.
-No crop.
-No reframing.
-No auto-centering.
-Subject size remains constant.
-Framing matches the reference image exactly.
-
-VISUAL ELEMENT:
-A vertical luminous seam divides the face down the center.
-The seam is a fixed visual design element.
-It remains constant in brightness, thickness, and position.
-No fading.
-No pulsing.
-No brightness changes.
-
-The left eye contains a subtle steady internal glow.
-The glow remains constant and stable.
-No flicker.
-No activation.
-No intensity change.
-
-FACIAL EXPRESSION:
-Left half: calm, serious, minimal expression.
-Right half: slightly more expressive but still controlled.
-No smiling.
-No exaggerated asymmetry.
-No dramatic emotional spikes.
-
-PERFORMANCE:
-Highly accurate lip sync driven strictly by the audio.
-Natural vowel articulation.
-Minimal head movement.
-Natural blinking.
-Controlled breathing.
-
-During sustained notes, the mouth remains naturally open for the full duration of the note and closes only when the audio ends.
-Jaw remains steady during long vowels.
-"""
-
 # =====================================================
 # HELPERS
 # =====================================================
@@ -149,6 +100,38 @@ def raise_with_body(resp: requests.Response):
         body = "<unreadable body>"
     print(f"Request failed: {resp.status_code} {body}")
     resp.raise_for_status()
+
+
+def load_prompt_text(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Prompt file not found: {path}")
+
+    with open(path, "r", encoding="utf-8") as f:
+        prompt_text = f.read().strip()
+
+    if not prompt_text:
+        raise ValueError(f"Prompt file is empty: {path}")
+
+    return prompt_text
+
+
+def resolve_model_id(model_name):
+    url = f"{API_BASE}/models"
+    resp = requests.get(url, headers=HEADERS, timeout=30)
+    if not resp.ok:
+        raise_with_body(resp)
+
+    models = resp.json()
+    normalized_name = model_name.strip().lower()
+
+    for model in models:
+        if str(model.get("name", "")).strip().lower() == normalized_name:
+            return model["id"]
+
+    available_names = ", ".join(sorted(model.get("name", "<unnamed>") for model in models))
+    raise ValueError(
+        f"HEDRA_MODEL_NAME '{model_name}' not found. Available models: {available_names}"
+    )
 
 
 def create_asset_record(name, type_="image"):
@@ -215,6 +198,13 @@ def upload_asset(path, name=None, mime=None, type_="image"):
 os.makedirs(OUTPUT_AUDIO_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_VIDEO_FOLDER, exist_ok=True)
 
+session_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+session_video_folder = os.path.join(OUTPUT_VIDEO_FOLDER, session_timestamp)
+os.makedirs(session_video_folder, exist_ok=True)
+videos_manifest_path = os.path.join(session_video_folder, "videos.txt")
+
+print("Session video folder:", session_video_folder)
+
 print("Splitting audio...")
 audio = AudioSegment.from_mp3(INPUT_MP3)
 duration_ms = len(audio)
@@ -245,6 +235,11 @@ image_asset_id = upload_asset(
 )
 print("Reference image asset id:", image_asset_id)
 
+prompt_text = load_prompt_text(PROMPT_FILE)
+model_id = resolve_model_id(HEDRA_MODEL_NAME)
+print("Using prompt file:", PROMPT_FILE)
+print("Using model:", HEDRA_MODEL_NAME, model_id)
+
 video_files = []
 
 for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
@@ -265,9 +260,9 @@ for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
         "type": "video",
         "start_keyframe_id": image_asset_id,
         "audio_id": audio_asset_id,
-        "ai_model_id": "d1dd37a3-e39a-4854-a298-6510289f9cf2",
+        "ai_model_id": model_id,
         "generated_video_inputs": {
-            "text_prompt": PROMPT_TEXT,
+            "text_prompt": prompt_text,
             "duration_ms": audio_duration_ms,
             "aspect_ratio": "9:16",
             "resolution": "720p",
@@ -327,7 +322,7 @@ for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
     if not video_url:
         raise Exception("No video_url returned")
 
-    video_path = os.path.join(OUTPUT_VIDEO_FOLDER, f"video_{idx:03}.mp4")
+    video_path = os.path.join(session_video_folder, f"video_{idx:03}.mp4")
 
     print("Downloading video...")
     with requests.get(video_url, stream=True, timeout=120) as vid_resp:
@@ -351,7 +346,7 @@ for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
 
 print("\nStitching final video...")
 
-with open("videos.txt", "w") as f:
+with open(videos_manifest_path, "w") as f:
     for v in video_files:
         f.write(f"file '{os.path.abspath(v)}'\n")
 
@@ -363,7 +358,7 @@ ffmpeg_cmd = [
     "-safe",
     "0",
     "-i",
-    "videos.txt",
+    videos_manifest_path,
     "-c:v",
     "libx264",
     "-crf",

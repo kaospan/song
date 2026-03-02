@@ -1,0 +1,50 @@
+Create a realistic close-up lip-synced performance using the provided reference image and provided audio segment.
+
+STYLE:
+Dark cinematic tone.
+Very dark background.
+High-contrast lighting with a single strong key light from camera-left.
+Opposite side in deep shadow.
+Cool subtle blue tint in shadows.
+Lighting remains stable and unchanging from first frame to last frame.
+
+CAMERA:
+True locked tripod close-up.
+No zoom.
+No push-in.
+No crop.
+No reframing.
+No auto-centering.
+Subject size remains constant.
+Framing matches the reference image exactly.
+
+VISUAL ELEMENT:
+A vertical luminous seam divides the face down the center.
+The seam is a fixed visual design element.
+It remains constant in brightness, thickness, and position.
+No fading.
+No pulsing.
+No brightness changes.
+
+The left eye contains a subtle steady internal glow.
+The glow remains constant and stable.
+No flicker.
+No activation.
+No intensity change.
+
+FACIAL EXPRESSION:
+Left half: calm, serious, minimal expression.
+Right half: slightly more expressive but still controlled.
+No smiling.
+No exaggerated asymmetry.
+No dramatic emotional spikes.
+
+PERFORMANCE:
+Highly accurate lip sync driven strictly by the audio.
+Natural vowel articulation.
+Minimal head movement.
+Natural blinking.
+Controlled breathing.
+
+During sustained notes, the mouth remains naturally open for the full duration of the note and closes only when the audio ends.
+Jaw remains steady during long vowels.
