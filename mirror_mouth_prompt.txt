@@ -1,50 +1,23 @@
-Create a realistic close-up lip-synced performance using the provided reference image and provided audio segment.
+Create a realistic close-up lip-synced performance from the provided reference image and audio segment.
 
-STYLE:
-Dark cinematic tone.
-Very dark background.
-High-contrast lighting with a single strong key light from camera-left.
-Opposite side in deep shadow.
-Cool subtle blue tint in shadows.
-Lighting remains stable and unchanging from first frame to last frame.
+Preserve exact identity, framing, lighting, and continuity. The result must feel like one continuous performance, not a reset.
 
-CAMERA:
-True locked tripod close-up.
-No zoom.
-No push-in.
-No crop.
-No reframing.
-No auto-centering.
-Subject size remains constant.
-Framing matches the reference image exactly.
+Style: dark cinematic tone, very dark background, strong key light from camera-left, deep shadow on the opposite side, subtle cool blue in shadows. Lighting stays fixed with no flicker, exposure shifts, or color drift.
 
-VISUAL ELEMENT:
-A vertical luminous seam divides the face down the center.
-The seam is a fixed visual design element.
-It remains constant in brightness, thickness, and position.
-No fading.
-No pulsing.
-No brightness changes.
+Camera: locked tripod close-up. No zoom, push-in, crop change, reframing, auto-centering, shake, or perspective change. Subject size stays constant. Match the reference image exactly.
 
-The left eye contains a subtle steady internal glow.
-The glow remains constant and stable.
-No flicker.
-No activation.
-No intensity change.
+Design: a vertical luminous seam divides the face down the center. Keep its position, thickness, and brightness constant. The left eye has a subtle steady internal glow with no flicker or intensity change.
 
-FACIAL EXPRESSION:
-Left half: calm, serious, minimal expression.
-Right half: slightly more expressive but still controlled.
-No smiling.
-No exaggerated asymmetry.
-No dramatic emotional spikes.
+Identity: preserve the exact same person. No face drift, hairstyle drift, skin-tone drift, age drift, warping, scene reset, or pose reset.
 
-PERFORMANCE:
-Highly accurate lip sync driven strictly by the audio.
-Natural vowel articulation.
-Minimal head movement.
-Natural blinking.
-Controlled breathing.
+Text and artifacts: no subtitles, lyrics, captions, lower thirds, logos, watermarks, letters, numbers, symbols, typography, interface elements, or gibberish marks anywhere in frame.
 
-During sustained notes, the mouth remains naturally open for the full duration of the note and closes only when the audio ends.
-Jaw remains steady during long vowels.
+Expression: calm, serious, controlled. Left half restrained. Right half only slightly more expressive. No exaggerated asymmetry or overacting.
+
+Eyes and blinking: the left eye must remain open for the entire segment and must not blink at all. The right eye may perform at most one very small natural blink in an 8 second segment. Prefer zero blinks over extra blinks. Never blink both eyes together. No repeated blinks, half blinks, eyelid flutter, rhythmic blinking, darting eyes, or nervous eye movement. Avoid any blink during sung syllables, consonant attacks, sustained notes, or important words.
+
+Lip sync: strict audio-driven lip sync. Every audible lyric and syllable must produce visible mouth articulation. Consonants and vowels must match the sung sound naturally. During sustained notes, keep the mouth naturally open for the full note and close only when the audio ends. No invented words, no invented singing, no silent mouth during clear vocals, and no random mouth motion when vocals are absent.
+
+Movement: minimal head movement, controlled breathing, and small natural facial motion only. No swaying, bobbing, beat nodding, sudden turns, or dramatic posture changes.
+
+Quality: photorealistic detail, stable eyes, stable facial proportions, stable mouth geometry, no jitter, no flicker, and no temporal warping.

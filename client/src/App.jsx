@@ -6,7 +6,10 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 function App() {
   const [songFile, setSongFile] = useState(null)
   const [imageFile, setImageFile] = useState(null)
+  const [songTitle, setSongTitle] = useState('')
+  const [songArtist, setSongArtist] = useState('')
   const [job, setJob] = useState(null)
+  const [defaultModelName, setDefaultModelName] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -14,6 +17,33 @@ function App() {
     if (!imageFile) return ''
     return URL.createObjectURL(imageFile)
   }, [imageFile])
+
+  useEffect(() => {
+    let isMounted = true
+
+    async function loadConfig() {
+      try {
+        const response = await fetch(`${API_BASE}/api/config`)
+        const payload = await response.json()
+        if (!response.ok) {
+          throw new Error(payload.detail || 'Unable to load backend config.')
+        }
+        if (isMounted) {
+          setDefaultModelName(payload.default_model_name ?? '')
+        }
+      } catch (configError) {
+        if (isMounted) {
+          setError(configError.message)
+        }
+      }
+    }
+
+    loadConfig()
+
+    return () => {
+      isMounted = false
+    }
+  }, [])
 
   useEffect(() => {
     return () => {
@@ -61,6 +91,8 @@ function App() {
       const formData = new FormData()
       formData.append('song', songFile)
       formData.append('image', imageFile)
+      formData.append('song_title', songTitle.trim())
+      formData.append('song_artist', songArtist.trim())
 
       const response = await fetch(`${API_BASE}/api/jobs`, {
         method: 'POST',
@@ -90,7 +122,7 @@ function App() {
         <p className="hero-copy">
           Upload the master track and reference portrait. The pipeline splits the song,
           generates timestamped segment runs, and returns one stitched vertical video using
-          Kling V3.
+          an audio-driven avatar model.
         </p>
       </section>
 
@@ -98,7 +130,7 @@ function App() {
         <form className="upload-panel" onSubmit={handleSubmit}>
           <div className="panel-header">
             <h2>Inputs</h2>
-            <span className="chip">Model: Kling V3 Standard I2V</span>
+            <span className="chip">Model: {defaultModelName || 'Loading...'}</span>
           </div>
 
           <label className="field-card">
@@ -109,6 +141,26 @@ function App() {
               onChange={(event) => setSongFile(event.target.files?.[0] ?? null)}
             />
             <strong>{songFile ? songFile.name : 'No file selected'}</strong>
+          </label>
+
+          <label className="field-card">
+            <span className="field-label">Song title</span>
+            <input
+              placeholder="Enter the song title"
+              type="text"
+              value={songTitle}
+              onChange={(event) => setSongTitle(event.target.value)}
+            />
+          </label>
+
+          <label className="field-card">
+            <span className="field-label">Artist</span>
+            <input
+              placeholder="Enter the artist name"
+              type="text"
+              value={songArtist}
+              onChange={(event) => setSongArtist(event.target.value)}
+            />
           </label>
 
           <label className="field-card">
@@ -146,6 +198,14 @@ function App() {
               <div>
                 <dt>Job ID</dt>
                 <dd>{job.id}</dd>
+              </div>
+              <div>
+                <dt>Title</dt>
+                <dd>{job.song_title || songTitle || 'Untitled'}</dd>
+              </div>
+              <div>
+                <dt>Artist</dt>
+                <dd>{job.song_artist || songArtist || 'Unknown'}</dd>
               </div>
               <div>
                 <dt>Song</dt>
