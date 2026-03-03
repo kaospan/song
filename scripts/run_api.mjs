@@ -29,7 +29,8 @@ function pickPython() {
 }
 
 const python = pickPython();
-const port = Number.parseInt(process.env.API_PORT || process.env.PORT || "8000", 10);
+// Default to 8001 to avoid collisions with other local dev backends that often use 8000.
+const port = Number.parseInt(process.env.API_PORT || process.env.PORT || "8001", 10);
 const args = [
   "-m",
   "uvicorn",

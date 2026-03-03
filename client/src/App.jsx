@@ -61,7 +61,7 @@ function App() {
 
   const [songFile, setSongFile] = useState(null)
   const [imageFiles, setImageFiles] = useState([])
-  const [lyricsFile, setLyricsFile] = useState(null)
+  const [lyricsText, setLyricsText] = useState('')
   const [songTitle, setSongTitle] = useState('')
   const [songArtist, setSongArtist] = useState('')
   const [job, setJob] = useState(null)
@@ -278,7 +278,7 @@ function App() {
       const formData = new FormData()
       formData.append('song', songFile)
       imageFiles.forEach((file) => formData.append('images', file))
-      if (lyricsFile) formData.append('lyrics', lyricsFile)
+      if (lyricsText.trim()) formData.append('lyrics_text', lyricsText)
       formData.append('song_title', songTitle.trim())
       formData.append('song_artist', songArtist.trim())
       formData.append('model_name', modelName || defaultModelName)
@@ -444,8 +444,14 @@ function App() {
 
           <label className="field-card">
             <span className="field-label">Lyrics (optional)</span>
-            <input accept=".txt,text/plain" type="file" onChange={(e) => setLyricsFile(e.target.files?.[0] ?? null)} />
-            <strong>{lyricsFile ? `${lyricsFile.name} · ${formatBytes(lyricsFile.size)}` : 'No file selected'}</strong>
+            <textarea
+              className="lyrics-textarea"
+              placeholder="Paste lyrics here (optional). They will be saved as lyrics.txt on the backend."
+              rows={10}
+              value={lyricsText}
+              onChange={(e) => setLyricsText(e.target.value)}
+            />
+            <p className="field-hint">Used to bias segment prompts. Lyrics are never rendered as on-screen text.</p>
           </label>
 
           <label className="field-card">
@@ -622,4 +628,3 @@ function App() {
 }
 
 export default App
-

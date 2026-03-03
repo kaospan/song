@@ -422,6 +422,7 @@ def run_job(
     audio_path,
     image_paths,
     lyrics_path,
+    lyrics_text_input,
     prompt_file,
     model_name,
     segment_length_seconds,
@@ -443,8 +444,8 @@ def run_job(
     )
 
     try:
-        lyrics_text = None
-        if lyrics_path and Path(lyrics_path).exists():
+        lyrics_text = (lyrics_text_input or "").strip() or None
+        if lyrics_text is None and lyrics_path and Path(lyrics_path).exists():
             lyrics_text = Path(lyrics_path).read_text(encoding="utf-8", errors="replace")
 
         if prompt_override:
@@ -538,6 +539,7 @@ def create_job(
     image: UploadFile = File(None),
     images: list[UploadFile] = File(None),
     lyrics: UploadFile = File(None),
+    lyrics_text: str = Form(""),
     model_name: str = Form(""),
     segment_length_seconds: int = Form(8),
     song_title: str = Form(""),
@@ -589,6 +591,11 @@ def create_job(
         lyrics_name = Path(lyrics.filename or "lyrics.txt").name
         lyrics_path = uploads_dir / lyrics_name
         save_upload(lyrics, lyrics_path)
+    lyrics_text_value = (lyrics_text or "").strip()
+    if lyrics_text_value:
+        lyrics_name = "lyrics.txt"
+        lyrics_path = uploads_dir / lyrics_name
+        lyrics_path.write_text(lyrics_text_value + "\n", encoding="utf-8")
 
     primary_image_name = image_paths[0].name
 
@@ -629,6 +636,7 @@ def create_job(
             audio_path,
             image_paths,
             lyrics_path,
+            lyrics_text_value,
             str(PROMPT_PATH),
             resolved_model_name,
             segment_length_seconds,
