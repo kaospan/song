@@ -21,3 +21,5 @@ Lip sync: strict audio-driven lip sync. Every audible lyric and syllable must pr
 Movement: minimal head movement, controlled breathing, and small natural facial motion only. No swaying, bobbing, beat nodding, sudden turns, or dramatic posture changes.
 
 Quality: photorealistic detail, stable eyes, stable facial proportions, stable mouth geometry, no jitter, no flicker, and no temporal warping.
+
+Emotion intensity (audio-driven): let facial emotion be driven solely by the tone of voice in the audio. If the delivery is soft or intimate, keep expression subtle and restrained. If the delivery becomes intense or powerful, increase emotional intensity in the eyes, brow, and mouth shape only. Do not add unrelated acting beats or extra emotion not present in the vocal tone. Emotion changes should be gradual and continuous, following phrasing and dynamics. Never introduce text, symbols, or visual overlays.

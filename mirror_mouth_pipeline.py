@@ -684,12 +684,15 @@ def run_pipeline(
     else:
         print("Session video folder:", session_video_folder)
 
+    reused_cached_audio = False
     audio_files = load_cached_audio_segments(
         output_audio_folder,
         input_mp3_hash,
         segment_length_seconds,
     )
-    if not audio_files:
+    if audio_files:
+        reused_cached_audio = True
+    else:
         audio_files = split_audio(input_mp3, output_audio_folder, segment_length_seconds)
         write_segments_manifest(
             output_audio_folder,
@@ -731,16 +734,20 @@ def run_pipeline(
             "session_video_folder": os.path.abspath(session_video_folder),
             "videos_manifest": os.path.abspath(videos_manifest_path),
             "video_segments": [os.path.abspath(path) for path in expected_videos],
+            "reused_cached_audio": reused_cached_audio,
+            "reused_image_asset": False,
         }
 
     image_asset_id = None
     image_hash = None
+    reused_image_asset = False
     if reuse_image_asset and image_asset_cache_path and not force_image_upload:
         image_hash = hash_file(reference_image)
         cache = load_asset_cache(image_asset_cache_path)
         cached_entry = cache.get("images", {}).get(image_hash)
         if cached_entry and cached_entry.get("asset_id"):
             image_asset_id = cached_entry["asset_id"]
+            reused_image_asset = True
             print("Reusing cached image asset id:", image_asset_id)
 
     if not image_asset_id:
@@ -899,6 +906,8 @@ def run_pipeline(
         "session_video_folder": os.path.abspath(session_video_folder),
         "videos_manifest": os.path.abspath(videos_manifest_path),
         "video_segments": [os.path.abspath(path) for path in video_files],
+        "reused_cached_audio": reused_cached_audio,
+        "reused_image_asset": reused_image_asset,
     }
 
 

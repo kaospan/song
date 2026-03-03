@@ -193,6 +193,17 @@ function App() {
               'Start a job to upload assets, generate segments, and stitch the final music video.'}
           </p>
 
+          {job ? (
+            <div className="reuse-flags">
+              <span className={`reuse-pill ${job.reused_cached_audio ? 'on' : 'off'}`}>
+                {job.reused_cached_audio ? 'Reused cached audio' : 'Fresh audio split'}
+              </span>
+              <span className={`reuse-pill ${job.reused_image_asset ? 'on' : 'off'}`}>
+                {job.reused_image_asset ? 'Reused image asset' : 'Uploaded new image'}
+              </span>
+            </div>
+          ) : null}
+
           {job?.id ? (
             <dl className="meta-grid">
               <div>
