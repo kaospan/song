@@ -501,6 +501,9 @@ def build_prompt_package(
     config: VideoPipelineConfig,
     engine: Optional[PromptEngine] = None,
     run_dir: Optional[str] = None,
+    segments_override: Optional[List[SegmentInfo]] = None,
+    media_duration_ms_override: Optional[int] = None,
+    media_sha256_override: Optional[str] = None,
 ) -> PipelineOutputs:
     """
     Core orchestration:
@@ -513,11 +516,37 @@ def build_prompt_package(
     """
     engine = engine or PromptEngine(config)
 
-    media = load_media(inputs.media_path) if inputs.media_path else MediaInfo(None, 0, "unknown", None)
-    if inputs.media_path and media.duration_ms <= 0:
-        raise ValueError("Unable to determine media duration. Provide a supported audio file or supply duration externally.")
+    media = MediaInfo(None, 0, "unknown", None)
+    if segments_override is not None:
+        segments = list(segments_override)
+        duration_ms = max(0, int(media_duration_ms_override or (segments[-1].end_ms if segments else 0)))
+        media = MediaInfo(
+            source_path=inputs.media_path,
+            duration_ms=duration_ms,
+            media_type="unknown",
+            sha256=(media_sha256_override or (inputs.metadata or {}).get("media_sha256")),
+        )
+    else:
+        if media_duration_ms_override is not None:
+            duration_ms = max(0, int(media_duration_ms_override))
+            media = MediaInfo(
+                source_path=inputs.media_path,
+                duration_ms=duration_ms,
+                media_type="unknown",
+                sha256=(media_sha256_override or (inputs.metadata or {}).get("media_sha256")),
+            )
+        elif inputs.media_path:
+            media = load_media(inputs.media_path)
+            if media.duration_ms <= 0:
+                raise ValueError(
+                    "Unable to determine media duration. Provide a supported audio file or supply duration externally."
+                )
+        else:
+            raise ValueError(
+                "No media duration available. Provide media_path, media_duration_ms_override, or segments_override."
+            )
 
-    segments = compute_segments(media.duration_ms, config.segment_duration_seconds)
+        segments = compute_segments(media.duration_ms, config.segment_duration_seconds)
     timestamps = build_timestamps_json(segments)
 
     script_text = parse_script_or_lyrics(inputs.script_text)

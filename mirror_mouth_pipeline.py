@@ -13,6 +13,15 @@ from datetime import datetime
 import requests
 from dotenv import load_dotenv
 
+# Content-agnostic prompt/segment packaging.
+from generic_video_pipeline import (
+    PipelineInputs as GenericPipelineInputs,
+    PromptEngine as GenericPromptEngine,
+    SegmentInfo as GenericSegmentInfo,
+    VideoPipelineConfig as GenericVideoPipelineConfig,
+    build_prompt_package as build_generic_prompt_package,
+)
+
 # =====================================================
 # ENV
 # =====================================================
@@ -246,6 +255,20 @@ def distribute_lyrics(lines, segment_count, max_lines_per_segment):
     return segments[:segment_count]
 
 
+class StaticMasterPromptEngine(GenericPromptEngine):
+    """
+    Uses a provided master prompt verbatim and generates per-segment prompts via config templates.
+    This avoids format-string collisions with curly braces inside the user prompt.
+    """
+
+    def __init__(self, config: GenericVideoPipelineConfig, master_prompt_text: str):
+        super().__init__(config)
+        self._master_prompt_text = (master_prompt_text or "").strip()
+
+    def build_master_prompt(self, context):
+        return self._master_prompt_text
+
+
 def format_time_range(idx, segment_length_seconds):
     start = idx * segment_length_seconds
     end = (idx + 1) * segment_length_seconds
@@ -280,6 +303,18 @@ def write_json_file(path, payload):
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
+
+
+def build_segment_infos_from_durations_ms(durations_ms):
+    segments = []
+    cursor = 0
+    for idx, dur in enumerate(durations_ms):
+        dur = max(0, int(dur))
+        start = cursor
+        end = cursor + dur
+        segments.append(GenericSegmentInfo(index=idx, start_ms=start, end_ms=end))
+        cursor = end
+    return segments
 
 
 def write_text_file(path, text):
@@ -1337,28 +1372,93 @@ def run_pipeline(
 
     if lyrics_text is None:
         lyrics_text = load_lyrics_text(lyrics_file)
-    lyrics_lines = normalize_lyrics_lines(lyrics_text)
-    lyrics_by_segment = distribute_lyrics(
-        lyrics_lines,
-        segment_count,
-        max_lines_per_segment=max(1, int(lyrics_max_lines_per_segment)),
-    )
 
     # MASTER_PROMPT is the locked style template. Segment prompts are derived from lyrics and written
     # to disk so a full run can be stitched without touching Hedra again.
     master_prompt_text = (
         validate_prompt_text(prompt_override) if prompt_override else load_prompt_text(prompt_file)
     )
-    creative_assets = generate_segment_prompt_assets(
-        session_video_folder,
-        master_prompt_text,
-        lyrics_text,
-        lyrics_by_segment,
-        segment_length_seconds,
-        segment_durations_ms=[dur for _, dur in audio_files],
-        song_title=song_title,
-        song_artist=song_artist,
+    segment_durations_ms = [dur for _, dur in audio_files]
+    segments_override = build_segment_infos_from_durations_ms(segment_durations_ms)
+    prompt_assets_dir = os.path.join(session_video_folder, "creative")
+    segment_prompt_template = (
+        "SEGMENT: {segment_number:03d} ({timestamp})\n"
+        "Script / lyrics (do not render as on-screen text):\n"
+        "{script}\n\n"
+        "Direction:\n"
+        "- Follow MASTER_PROMPT for style, identity, camera, lighting, and framing.\n"
+        "- Continuity: first frame continues from previous segment; no reset.\n"
+        "- No on-screen text, subtitles, captions, logos, watermarks, or gibberish artifacts.\n"
+        "- Escalation: intensity {intensity:.2f} (0..1) guides subtle evolution only when supported by the audio.\n"
     )
+    generic_config = GenericVideoPipelineConfig(
+        segment_duration_seconds=float(segment_length_seconds),
+        narrative_mode="music_video",
+        script_max_lines_per_segment=max(1, int(lyrics_max_lines_per_segment)),
+        segment_prompt_template=segment_prompt_template,
+        export_prompt_bundle=True,
+    )
+    generic_engine = StaticMasterPromptEngine(generic_config, master_prompt_text)
+    generic_outputs = build_generic_prompt_package(
+        GenericPipelineInputs(
+            media_path=input_mp3,
+            script_text=lyrics_text or "",
+            metadata={
+                "song_title": song_title or "",
+                "song_artist": song_artist or "",
+            },
+        ),
+        config=generic_config,
+        engine=generic_engine,
+        run_dir=prompt_assets_dir,
+        segments_override=segments_override,
+        media_duration_ms_override=sum(segment_durations_ms),
+        media_sha256_override=input_mp3_hash,
+    )
+
+    generic_segments_payload = load_json_file(generic_outputs.segments_path) or {}
+    segment_prompt_rows = list(generic_segments_payload.get("segments", []) or [])
+    segment_prompt_texts = [row.get("segmentPrompt", "").strip() for row in segment_prompt_rows]
+    lyrics_by_segment = [row.get("scriptLines", "") for row in segment_prompt_rows]
+
+    write_text_file(os.path.join(session_video_folder, "master_prompt.txt"), master_prompt_text)
+    write_text_file(os.path.join(session_video_folder, "lyrics.txt"), lyrics_text or "")
+    timestamps_payload = load_json_file(generic_outputs.timestamps_path) or []
+    timestamp_map = [
+        {
+            "segment": entry.get("segment"),
+            "start": entry.get("start"),
+            "end": entry.get("end"),
+            "timestamp": entry.get("timestamp"),
+        }
+        for entry in timestamps_payload
+    ]
+    write_json_file(os.path.join(session_video_folder, "timestamp_map.json"), timestamp_map)
+    write_json_file(
+        os.path.join(session_video_folder, "segments_prompts.json"),
+        {
+            "MASTER_PROMPT": master_prompt_text.strip(),
+            "segment_length_seconds": float(segment_length_seconds),
+            "segment_count": int(segment_count),
+            "segments": [
+                {
+                    "segmentNumber": row.get("segmentNumber"),
+                    "timestamp": row.get("timestamp"),
+                    "lyricsLines": row.get("scriptLines", ""),
+                    "scenePrompt": row.get("segmentPrompt", ""),
+                }
+                for row in segment_prompt_rows
+            ],
+        },
+    )
+    creative_assets = {
+        "prompt_assets_dir": os.path.abspath(prompt_assets_dir),
+        "segments_json": os.path.abspath(generic_outputs.segments_path),
+        "timestamps_json": os.path.abspath(generic_outputs.timestamps_path),
+        "prompt_bundle_json": os.path.abspath(generic_outputs.prompt_bundle_path)
+        if generic_outputs.prompt_bundle_path
+        else None,
+    }
 
     if not resume_session and not session_label:
         latest_session_folder = get_latest_session_folder(output_video_root)
@@ -1462,7 +1562,7 @@ def run_pipeline(
             "fingerprint": fingerprint,
         },
     )
-    if lyrics_lines:
+    if any((row or "").strip() for row in lyrics_by_segment):
         save_lyrics_segments(session_video_folder, segment_length_seconds, lyrics_by_segment)
 
     if not resume_session:
@@ -1632,20 +1732,9 @@ def run_pipeline(
 
         include_reference_images = (idx == 0 and len(image_asset_ids) > 1)
 
-        segment_lyrics = lyrics_by_segment[idx] if idx < len(lyrics_by_segment) else ""
-        segment_prompt = prompt_text
-        if segment_lyrics:
-            segment_prompt += (
-                f"\n\nSEGMENT: {idx:03d}"
-                f"\n\nLYRICS (for this segment; do not render as text):\n{segment_lyrics}"
-            )
-            if lyrics_scene_mode:
-                segment_prompt += (
-                    "\n\nScene direction: treat these lyrics as the emotional beat for this segment. "
-                    "You may introduce a subtle change in background set dressing or atmosphere between segments "
-                    "while keeping the camera locked and the subject identity stable. "
-                    "Never add any on-screen text."
-                )
+        segment_prompt = (
+            segment_prompt_texts[idx] if idx < len(segment_prompt_texts) else prompt_text
+        )
         segment_prompt = validate_prompt_text(segment_prompt)
 
         generation_payload = {
