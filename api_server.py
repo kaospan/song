@@ -59,9 +59,19 @@ def save_upload(upload, destination):
         shutil.copyfileobj(upload.file, buffer)
 
 
-def run_job(job_id, audio_path, image_path, prompt_file, model_name, segment_length_seconds):
+def run_job(
+    job_id,
+    audio_path,
+    image_path,
+    prompt_file,
+    model_name,
+    segment_length_seconds,
+    song_title,
+    song_artist,
+):
     job_dir = JOB_ROOT / job_id
     final_video_path = job_dir / "final_music_video.mp4"
+    audio_cache_root = JOB_ROOT / "audio_cache"
 
     update_job(
         job_id,
@@ -79,7 +89,9 @@ def run_job(job_id, audio_path, image_path, prompt_file, model_name, segment_len
             final_video_name=str(final_video_path),
             prompt_file=prompt_file,
             model_name=model_name,
-            session_label=job_id,
+            song_title=song_title,
+            song_artist=song_artist,
+            audio_cache_root=str(audio_cache_root),
         )
     except Exception as exc:
         update_job(
@@ -120,6 +132,8 @@ def create_job(
     image: UploadFile = File(...),
     model_name: str = Form(HEDRA_MODEL_NAME),
     segment_length_seconds: int = Form(8),
+    song_title: str = Form(""),
+    song_artist: str = Form(""),
 ):
     job_id = uuid.uuid4().hex
     job_dir = JOB_ROOT / job_id
@@ -145,6 +159,8 @@ def create_job(
             "updated_at": iso_now(),
             "audio_filename": audio_name,
             "image_filename": image_name,
+            "song_title": song_title,
+            "song_artist": song_artist,
             "model_name": model_name,
             "segment_length_seconds": segment_length_seconds,
             "final_video": None,
@@ -154,7 +170,16 @@ def create_job(
 
     thread = threading.Thread(
         target=run_job,
-        args=(job_id, audio_path, image_path, str(PROMPT_PATH), model_name, segment_length_seconds),
+        args=(
+            job_id,
+            audio_path,
+            image_path,
+            str(PROMPT_PATH),
+            model_name,
+            segment_length_seconds,
+            song_title,
+            song_artist,
+        ),
         daemon=True,
     )
     thread.start()
