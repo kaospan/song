@@ -1,25 +1,21 @@
-Create a realistic close-up lip-synced performance from the provided reference image and audio segment.
+Realistic close-up lip-synced performance from the reference image and audio segment. The first frame must seamlessly continue from the last frame of the previous segment (no reset).
 
-Preserve exact identity, framing, lighting, and continuity. The result must feel like one continuous performance, not a reset.
+Preserve exact identity, framing, lighting, and continuity. No face/pose drift, no warping.
 
-Style: dark cinematic tone, very dark background, strong key light from camera-left, deep shadow on the opposite side, subtle cool blue in shadows. Lighting stays fixed with no flicker, exposure shifts, or color drift.
+Style: dark cinematic, very dark background, strong key light from camera-left, deep shadow opposite, subtle cool blue in shadows. Lighting fixed, no flicker or exposure shift.
 
-Camera: locked tripod close-up. No zoom, push-in, crop change, reframing, auto-centering, shake, or perspective change. Subject size stays constant. Match the reference image exactly.
+Camera: locked tripod close-up. No zoom, push, crop, reframe, auto-center, or shake. Subject size constant and matches the reference image.
 
-Design: a vertical luminous seam divides the face down the center. Keep its position, thickness, and brightness constant. The left eye has a subtle steady internal glow with no flicker or intensity change.
+Design: vertical luminous seam divides the face; position/thickness/brightness fixed. Left eye has subtle steady internal glow with no flicker or intensity change.
 
-Identity: preserve the exact same person. No face drift, hairstyle drift, skin-tone drift, age drift, warping, scene reset, or pose reset.
+No text or artifacts: no subtitles, lyrics, captions, logos, watermarks, letters, numbers, symbols, or gibberish.
 
-Text and artifacts: no subtitles, lyrics, captions, lower thirds, logos, watermarks, letters, numbers, symbols, typography, interface elements, or gibberish marks anywhere in frame.
+Expression: calm, serious, controlled. Left half restrained. Right half only slightly more expressive. No overacting or exaggerated asymmetry.
 
-Expression: calm, serious, controlled. Left half restrained. Right half only slightly more expressive. No exaggerated asymmetry or overacting.
+Eyes/blinking: left eye must remain open and never blink. Right eye should almost never blink: at most one tiny blink per 20 seconds, prefer zero. Never blink both eyes together. No repeated blinks, flutter, or darting eyes. Avoid any blink during sung syllables, consonant attacks, sustained notes, or important words.
 
-Eyes and blinking: the left eye must remain open for the entire segment and must not blink at all. The right eye should almost never blink: at most one very small blink per 20 seconds of video. Prefer zero blinks unless absolutely necessary. Never blink both eyes together. No repeated blinks, half blinks, eyelid flutter, rhythmic blinking, darting eyes, or nervous eye movement. Avoid any blink during sung syllables, consonant attacks, sustained notes, or important words.
+Lip sync: strict audio-driven. Every audible lyric/syllable must show matching mouth articulation. Consonants and vowels must match naturally. During sustained notes, keep the mouth open for the full note and close only when the audio ends. No invented words, no silent mouth during clear vocals, no random mouth motion when vocals are absent.
 
-Lip sync: strict audio-driven lip sync. Every audible lyric and syllable must produce visible mouth articulation. Consonants and vowels must match the sung sound naturally. During sustained notes, keep the mouth naturally open for the full note and close only when the audio ends. No invented words, no invented singing, no silent mouth during clear vocals, and no random mouth motion when vocals are absent.
+Movement: minimal head movement and small natural facial motion only. No swaying, nodding, sudden turns, or dramatic posture changes.
 
-Movement: minimal head movement, controlled breathing, and small natural facial motion only. No swaying, bobbing, beat nodding, sudden turns, or dramatic posture changes.
-
-Quality: photorealistic detail, stable eyes, stable facial proportions, stable mouth geometry, no jitter, no flicker, and no temporal warping.
-
-Emotion intensity (audio-driven): let facial emotion be driven solely by the tone of voice in the audio. If the delivery is soft or intimate, keep expression subtle and restrained. If the delivery becomes intense or powerful, increase emotional intensity in the eyes, brow, and mouth shape only. Do not add unrelated acting beats or extra emotion not present in the vocal tone. Emotion changes should be gradual and continuous, following phrasing and dynamics. Never introduce text, symbols, or visual overlays.
+Emotion intensity (audio-driven): follow the vocal tone only. Soft/intimate delivery = subtle expression. Intense/powerful delivery = stronger emotion in eyes/brow/mouth only. No extra acting beats beyond the audio. Changes should be gradual and continuous, following phrasing and dynamics.

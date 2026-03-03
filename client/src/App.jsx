@@ -10,6 +10,10 @@ function App() {
   const [songArtist, setSongArtist] = useState('')
   const [job, setJob] = useState(null)
   const [defaultModelName, setDefaultModelName] = useState('')
+  const [availableModels, setAvailableModels] = useState([])
+  const [modelName, setModelName] = useState('')
+  const [videoStyles, setVideoStyles] = useState([])
+  const [videoStyle, setVideoStyle] = useState('cinematic_studio')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -30,6 +34,9 @@ function App() {
         }
         if (isMounted) {
           setDefaultModelName(payload.default_model_name ?? '')
+          setModelName(payload.default_model_name ?? '')
+          setVideoStyles(payload.video_styles ?? [])
+          setVideoStyle(payload.default_video_style ?? 'cinematic_studio')
         }
       } catch (configError) {
         if (isMounted) {
@@ -39,6 +46,25 @@ function App() {
     }
 
     loadConfig()
+
+    async function loadModels() {
+      try {
+        const response = await fetch(`${API_BASE}/api/models`)
+        const payload = await response.json()
+        if (!response.ok) {
+          throw new Error(payload.detail || 'Unable to load models.')
+        }
+        if (isMounted) {
+          setAvailableModels(payload.models ?? [])
+        }
+      } catch (modelError) {
+        if (isMounted) {
+          setError(modelError.message)
+        }
+      }
+    }
+
+    loadModels()
 
     return () => {
       isMounted = false
@@ -93,6 +119,8 @@ function App() {
       formData.append('image', imageFile)
       formData.append('song_title', songTitle.trim())
       formData.append('song_artist', songArtist.trim())
+      formData.append('model_name', modelName || defaultModelName)
+      formData.append('video_style', videoStyle)
 
       const response = await fetch(`${API_BASE}/api/jobs`, {
         method: 'POST',
@@ -164,6 +192,30 @@ function App() {
           </label>
 
           <label className="field-card">
+            <span className="field-label">Video type</span>
+            <select value={videoStyle} onChange={(event) => setVideoStyle(event.target.value)}>
+              {(videoStyles.length ? videoStyles : [{ value: 'cinematic_studio', label: 'Cinematic Studio' }]).map(
+                (style) => (
+                  <option key={style.value} value={style.value}>
+                    {style.label}
+                  </option>
+                )
+              )}
+            </select>
+          </label>
+
+          <label className="field-card">
+            <span className="field-label">Model selection</span>
+            <select value={modelName} onChange={(event) => setModelName(event.target.value)}>
+              {(availableModels.length ? availableModels : [defaultModelName || 'Loading...']).map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field-card">
             <span className="field-label">Still image</span>
             <input
               accept="image/*,.png,.jpg,.jpeg,.webp"
@@ -217,6 +269,14 @@ function App() {
               <div>
                 <dt>Artist</dt>
                 <dd>{job.song_artist || songArtist || 'Unknown'}</dd>
+              </div>
+              <div>
+                <dt>Video type</dt>
+                <dd>{job.video_style || videoStyle}</dd>
+              </div>
+              <div>
+                <dt>Model</dt>
+                <dd>{job.model_name || modelName || defaultModelName}</dd>
               </div>
               <div>
                 <dt>Song</dt>

@@ -116,6 +116,11 @@ DOWNLOAD_TIMEOUT_SECONDS = float(os.environ.get("DOWNLOAD_TIMEOUT_SECONDS", "120
 DOWNLOAD_RETRY_LIMIT = int(os.environ.get("DOWNLOAD_RETRY_LIMIT", "5"))
 DOWNLOAD_RETRY_BACKOFF_SECONDS = float(os.environ.get("DOWNLOAD_RETRY_BACKOFF_SECONDS", "10"))
 PROMPT_CHAR_LIMIT = int(os.environ.get("PROMPT_CHAR_LIMIT", "2500"))
+PROMPT_STRICT_LIMIT = os.environ.get("PROMPT_STRICT_LIMIT", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 RESUME_SESSION = normalize_env_path(os.environ.get("RESUME_SESSION"))
 SESSION_LABEL = os.environ.get("SESSION_LABEL")
 
@@ -163,11 +168,29 @@ def load_prompt_text(path):
 
     if not prompt_text:
         raise ValueError(f"Prompt file is empty: {path}")
-    if len(prompt_text) > PROMPT_CHAR_LIMIT:
-        raise ValueError(
-            f"Prompt file exceeds {PROMPT_CHAR_LIMIT} characters: {len(prompt_text)}"
-        )
 
+    return validate_prompt_text(prompt_text)
+
+
+def validate_prompt_text(prompt_text):
+    prompt_text = (prompt_text or "").strip()
+    if not prompt_text:
+        raise ValueError("Prompt text is empty.")
+    if len(prompt_text) > PROMPT_CHAR_LIMIT:
+        if PROMPT_STRICT_LIMIT:
+            raise ValueError(
+                f"Prompt exceeds {PROMPT_CHAR_LIMIT} characters: {len(prompt_text)}"
+            )
+        cutoff = prompt_text.rfind("\n", 0, PROMPT_CHAR_LIMIT)
+        if cutoff <= 0:
+            cutoff = PROMPT_CHAR_LIMIT
+        trimmed = prompt_text[:cutoff].rstrip()
+        print(
+            "Prompt exceeded limit "
+            f"({len(prompt_text)} > {PROMPT_CHAR_LIMIT}). "
+            f"Trimming to {len(trimmed)} characters."
+        )
+        return trimmed
     return prompt_text
 
 
@@ -660,6 +683,7 @@ def run_pipeline(
     image_asset_cache_path=IMAGE_ASSET_CACHE_PATH,
     reuse_image_asset=REUSE_IMAGE_ASSET,
     force_image_upload=FORCE_IMAGE_UPLOAD,
+    prompt_override=None,
 ):
     if not os.path.exists(input_mp3):
         raise FileNotFoundError(f"Input MP3 not found: {input_mp3}")
@@ -770,7 +794,7 @@ def run_pipeline(
             }
             save_asset_cache(image_asset_cache_path, cache)
 
-    prompt_text = load_prompt_text(prompt_file)
+    prompt_text = validate_prompt_text(prompt_override) if prompt_override else load_prompt_text(prompt_file)
     model = resolve_model(model_name)
     model_id = model["id"]
     print("Using prompt file:", prompt_file)

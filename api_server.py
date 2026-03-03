@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import shutil
 import threading
 import traceback
@@ -9,8 +10,9 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+import requests
 
-from mirror_mouth_pipeline import HEDRA_MODEL_NAME, PROMPT_FILE, run_pipeline
+from mirror_mouth_pipeline import API_BASE, HEDRA_MODEL_NAME, PROMPT_FILE, get_headers, run_pipeline
 
 BASE_DIR = Path(__file__).resolve().parent
 JOB_ROOT = BASE_DIR / "job_runs"
@@ -18,6 +20,26 @@ JOB_ROOT.mkdir(exist_ok=True)
 PROMPT_PATH = Path(PROMPT_FILE)
 if not PROMPT_PATH.is_absolute():
     PROMPT_PATH = (BASE_DIR / PROMPT_PATH).resolve()
+PROMPT_HISTORY_PATH = JOB_ROOT / "prompt_history.json"
+
+VIDEO_STYLE_PRESETS = {
+    "cinematic_studio": {
+        "label": "Cinematic Studio",
+        "text": "Video type: cinematic studio close-up performance. Keep lighting and framing consistent.",
+    },
+    "intimate_acoustic": {
+        "label": "Intimate Acoustic",
+        "text": "Video type: intimate acoustic performance. Softer expression and gentler emotion while keeping strict lip sync.",
+    },
+    "high_energy": {
+        "label": "High Energy",
+        "text": "Video type: high-energy performance. Increase intensity only where the audio clearly drives it; no extra acting.",
+    },
+    "noir_minimal": {
+        "label": "Noir Minimal",
+        "text": "Video type: minimalist noir. Even more restrained motion and expression; keep the mood austere.",
+    },
+}
 
 jobs = {}
 jobs_lock = threading.Lock()
@@ -59,6 +81,50 @@ def save_upload(upload, destination):
         shutil.copyfileobj(upload.file, buffer)
 
 
+def load_prompt_history():
+    if not PROMPT_HISTORY_PATH.exists():
+        return []
+    try:
+        return json.loads(PROMPT_HISTORY_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+
+
+def save_prompt_history(entries):
+    PROMPT_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PROMPT_HISTORY_PATH.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+
+
+def append_prompt_history(entry):
+    entries = load_prompt_history()
+    entries.append(entry)
+    save_prompt_history(entries)
+
+
+def build_prompt(base_prompt, video_style):
+    preset = VIDEO_STYLE_PRESETS.get(video_style)
+    if not preset:
+        return base_prompt
+    return f"{base_prompt}\n\n{preset['text']}"
+
+
+def fetch_available_models():
+    try:
+        resp = requests.get(f"{API_BASE}/models", headers=get_headers(), timeout=30)
+        if not resp.ok:
+            return []
+        models = resp.json()
+        return sorted(
+            [
+                model.get("name", "")
+                for model in models
+                if model.get("type") == "video"
+            ]
+        )
+    except requests.RequestException:
+        return []
+
+
 def run_job(
     job_id,
     audio_path,
@@ -68,6 +134,7 @@ def run_job(
     segment_length_seconds,
     song_title,
     song_artist,
+    video_style,
 ):
     job_dir = JOB_ROOT / job_id
     final_video_path = job_dir / "final_music_video.mp4"
@@ -80,6 +147,8 @@ def run_job(
     )
 
     try:
+        base_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+        prompt_text = build_prompt(base_prompt, video_style)
         result = run_pipeline(
             input_mp3=str(audio_path),
             reference_image=str(image_path),
@@ -92,6 +161,7 @@ def run_job(
             song_title=song_title,
             song_artist=song_artist,
             audio_cache_root=str(audio_cache_root),
+            prompt_override=prompt_text,
         )
     except Exception as exc:
         update_job(
@@ -102,6 +172,18 @@ def run_job(
             traceback=traceback.format_exc(),
         )
         return
+
+    append_prompt_history(
+        {
+            "job_id": job_id,
+            "created_at": iso_now(),
+            "song_title": song_title,
+            "song_artist": song_artist,
+            "model_name": model_name,
+            "video_style": video_style,
+            "prompt": prompt_text,
+        }
+    )
 
     update_job(
         job_id,
@@ -125,7 +207,17 @@ def config():
     return {
         "default_model_name": HEDRA_MODEL_NAME,
         "prompt_file": str(PROMPT_PATH),
+        "video_styles": [
+            {"value": key, "label": preset["label"]}
+            for key, preset in VIDEO_STYLE_PRESETS.items()
+        ],
+        "default_video_style": "cinematic_studio",
     }
+
+
+@app.get("/api/models")
+def models():
+    return {"models": fetch_available_models()}
 
 
 @app.post("/api/jobs", status_code=202)
@@ -136,6 +228,7 @@ def create_job(
     segment_length_seconds: int = Form(8),
     song_title: str = Form(""),
     song_artist: str = Form(""),
+    video_style: str = Form("cinematic_studio"),
 ):
     job_id = uuid.uuid4().hex
     job_dir = JOB_ROOT / job_id
@@ -163,6 +256,7 @@ def create_job(
             "image_filename": image_name,
             "song_title": song_title,
             "song_artist": song_artist,
+            "video_style": video_style,
             "model_name": model_name,
             "segment_length_seconds": segment_length_seconds,
             "final_video": None,
@@ -183,6 +277,7 @@ def create_job(
             segment_length_seconds,
             song_title,
             song_artist,
+            video_style,
         ),
         daemon=True,
     )
