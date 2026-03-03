@@ -146,11 +146,11 @@ function App() {
     <main className="app-shell">
       <section className="hero-panel">
         <p className="eyebrow">Mirror Mouth Studio</p>
-        <h1>Turn one still image and one song into a full lip-synced video.</h1>
+        <h1>Turn a portrait and a track into a cinematic, lip‑synced performance.</h1>
         <p className="hero-copy">
-          Upload the master track and reference portrait. The pipeline splits the song,
-          generates timestamped segment runs, and returns one stitched vertical video using
-          an audio-driven avatar model.
+          Upload a reference image and your mastered audio. The system segments the track,
+          renders each performance beat, and delivers a single stitched vertical video ready
+          for release.
         </p>
       </section>
 
@@ -162,7 +162,7 @@ function App() {
           </div>
 
           <label className="field-card">
-            <span className="field-label">Song file</span>
+            <span className="field-label">Audio file</span>
             <input
               accept="audio/*,.mp3,.wav,.m4a"
               type="file"
@@ -172,9 +172,9 @@ function App() {
           </label>
 
           <label className="field-card">
-            <span className="field-label">Song title</span>
+            <span className="field-label">Track title</span>
             <input
-              placeholder="Enter the song title"
+              placeholder="Enter the track title"
               type="text"
               value={songTitle}
               onChange={(event) => setSongTitle(event.target.value)}
@@ -182,9 +182,9 @@ function App() {
           </label>
 
           <label className="field-card">
-            <span className="field-label">Artist</span>
+            <span className="field-label">Artist / Performer</span>
             <input
-              placeholder="Enter the artist name"
+              placeholder="Enter the artist or performer name"
               type="text"
               value={songArtist}
               onChange={(event) => setSongArtist(event.target.value)}
@@ -192,7 +192,7 @@ function App() {
           </label>
 
           <label className="field-card">
-            <span className="field-label">Video type</span>
+            <span className="field-label">Video concept</span>
             <select value={videoStyle} onChange={(event) => setVideoStyle(event.target.value)}>
               {(videoStyles.length ? videoStyles : [{ value: 'cinematic_studio', label: 'Cinematic Studio' }]).map(
                 (style) => (
@@ -205,7 +205,7 @@ function App() {
           </label>
 
           <label className="field-card">
-            <span className="field-label">Model selection</span>
+            <span className="field-label">Render model</span>
             <select value={modelName} onChange={(event) => setModelName(event.target.value)}>
               {(availableModels.length ? availableModels : [defaultModelName || 'Loading...']).map((model) => (
                 <option key={model} value={model}>
@@ -216,7 +216,7 @@ function App() {
           </label>
 
           <label className="field-card">
-            <span className="field-label">Still image</span>
+            <span className="field-label">Reference image</span>
             <input
               accept="image/*,.png,.jpg,.jpeg,.webp"
               type="file"
@@ -226,7 +226,7 @@ function App() {
           </label>
 
           <button className="launch-button" disabled={isSubmitting} type="submit">
-            {isSubmitting ? 'Starting job...' : 'Generate full video'}
+            {isSubmitting ? 'Starting render...' : 'Generate performance video'}
           </button>
 
           {error ? <p className="error-text">{error}</p> : null}
@@ -242,7 +242,7 @@ function App() {
 
           <p className="status-copy">
             {job?.message ??
-              'Start a job to upload assets, generate segments, and stitch the final music video.'}
+              'Launch a render to upload assets, generate segments, and stitch the final performance cut.'}
           </p>
 
           {job ? (
@@ -279,7 +279,7 @@ function App() {
                 <dd>{job.model_name || modelName || defaultModelName}</dd>
               </div>
               <div>
-                <dt>Song</dt>
+                <dt>Audio</dt>
                 <dd>{job.audio_filename}</dd>
               </div>
               <div>
@@ -306,7 +306,7 @@ function App() {
           <h2>Output</h2>
           {videoUrl ? (
             <a className="download-link" href={videoUrl}>
-              Download MP4
+              Download final MP4
             </a>
           ) : null}
         </div>
@@ -315,7 +315,7 @@ function App() {
           <video className="result-video" controls src={videoUrl} />
         ) : (
           <div className="video-placeholder">
-            The final video player appears here when the backend marks the job complete.
+            The final performance cut will appear here once rendering completes.
           </div>
         )}
       </section>
