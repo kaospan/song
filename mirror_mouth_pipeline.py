@@ -521,6 +521,15 @@ def archive_run_inputs(run_folder, input_mp3, reference_images):
         shutil.copy2(path, os.path.join(images_dir, os.path.basename(path)))
 
 
+def archive_run_outputs(run_folder, final_video_path):
+    os.makedirs(run_folder, exist_ok=True)
+    target = os.path.join(run_folder, os.path.basename(final_video_path))
+    if os.path.normpath(target) == os.path.normpath(final_video_path):
+        return target
+    shutil.copy2(final_video_path, target)
+    return target
+
+
 def load_cached_audio_segments(output_audio_folder, input_mp3_hash, segment_length_seconds):
     manifest_path = os.path.join(output_audio_folder, "segments_manifest.json")
     manifest = load_json_file(manifest_path)
@@ -908,6 +917,15 @@ def run_pipeline(
     if final_video_archive_folder == FINAL_VIDEO_ARCHIVE_FOLDER:
         final_video_archive_folder = os.path.join(final_video_archive_folder, output_stem)
 
+    run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+    run_archive_dir = (
+        os.path.join(final_video_archive_folder, "runs", run_stamp)
+        if final_video_archive_folder
+        else None
+    )
+    if run_archive_dir:
+        os.makedirs(run_archive_dir, exist_ok=True)
+
     session_video_folder = build_session_video_folder(
         output_video_root,
         session_label=session_label,
@@ -916,10 +934,8 @@ def run_pipeline(
     final_video_name = build_named_final_video_path(final_video_name, song_title, song_artist)
     final_video_name = build_timestamped_final_video_name(final_video_name)
     final_video_dir = os.path.dirname(final_video_name)
-    if not final_video_dir and final_video_archive_folder:
-        run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
-        final_video_dir = os.path.join(final_video_archive_folder, "runs", run_stamp)
-        os.makedirs(final_video_dir, exist_ok=True)
+    if not final_video_dir and run_archive_dir:
+        final_video_dir = run_archive_dir
         final_video_name = os.path.join(final_video_dir, os.path.basename(final_video_name))
     videos_manifest_path = os.path.join(session_video_folder, "videos.txt")
 
@@ -968,8 +984,9 @@ def run_pipeline(
             final_video_name,
             audio_track_path=input_mp3 if not existing_lip_sync else None,
         )
-        if final_video_dir:
-            archive_run_inputs(final_video_dir, input_mp3, reference_images)
+        if run_archive_dir:
+            archive_run_inputs(run_archive_dir, input_mp3, reference_images)
+            archive_run_outputs(run_archive_dir, final_video_name)
         versioned_copy_path = save_versioned_video_copy(
             final_video_name,
             input_mp3,
@@ -1061,8 +1078,9 @@ def run_pipeline(
                 final_video_name,
                 audio_track_path=input_mp3 if not model_requires_audio else None,
             )
-            if final_video_dir:
-                archive_run_inputs(final_video_dir, input_mp3, reference_images)
+            if run_archive_dir:
+                archive_run_inputs(run_archive_dir, input_mp3, reference_images)
+                archive_run_outputs(run_archive_dir, final_video_name)
             versioned_copy_path = save_versioned_video_copy(
                 final_video_name,
                 input_mp3,
@@ -1339,8 +1357,9 @@ def run_pipeline(
         final_video_name,
         audio_track_path=input_mp3 if not model_requires_audio else None,
     )
-    if final_video_dir:
-        archive_run_inputs(final_video_dir, input_mp3, reference_images)
+    if run_archive_dir:
+        archive_run_inputs(run_archive_dir, input_mp3, reference_images)
+        archive_run_outputs(run_archive_dir, final_video_name)
     versioned_copy_path = save_versioned_video_copy(
         final_video_name,
         input_mp3,
