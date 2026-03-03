@@ -161,6 +161,7 @@ def run_job(
     job_id,
     audio_path,
     image_paths,
+    lyrics_path,
     prompt_file,
     model_name,
     segment_length_seconds,
@@ -168,6 +169,8 @@ def run_job(
     song_artist,
     video_style,
     lip_sync_required,
+    segment_name,
+    prompt_override,
 ):
     job_dir = JOB_ROOT / job_id
     final_video_path = job_dir / "final_music_video.mp4"
@@ -180,8 +183,15 @@ def run_job(
     )
 
     try:
-        base_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-        prompt_text = build_prompt_with_options(base_prompt, video_style, lip_sync_required)
+        lyrics_text = None
+        if lyrics_path and Path(lyrics_path).exists():
+            lyrics_text = Path(lyrics_path).read_text(encoding="utf-8", errors="replace")
+
+        if prompt_override:
+            prompt_text = str(prompt_override)
+        else:
+            base_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+            prompt_text = build_prompt_with_options(base_prompt, video_style, lip_sync_required)
         result = run_pipeline(
             input_mp3=str(audio_path),
             reference_images=[str(path) for path in image_paths],
@@ -196,6 +206,7 @@ def run_job(
             audio_cache_root=str(audio_cache_root),
             prompt_override=prompt_text,
             lip_sync_required=lip_sync_required,
+            lyrics_text=lyrics_text,
         )
     except Exception as exc:
         update_job(
@@ -216,6 +227,7 @@ def run_job(
             "model_name": model_name,
             "video_style": video_style,
             "lip_sync_required": lip_sync_required,
+            "segment_name": segment_name,
             "prompt": prompt_text,
         }
     )
@@ -260,12 +272,15 @@ def create_job(
     song: UploadFile = File(...),
     image: UploadFile = File(None),
     images: list[UploadFile] = File(None),
+    lyrics: UploadFile = File(None),
     model_name: str = Form(""),
     segment_length_seconds: int = Form(8),
     song_title: str = Form(""),
     song_artist: str = Form(""),
     video_style: str = Form("cinematic_studio"),
     lip_sync_required: str = Form("1"),
+    segment_name: str = Form(""),
+    prompt_override: str = Form(""),
 ):
     lip_sync = str(lip_sync_required).strip().lower() in ("1", "true", "yes", "on")
     resolved_model_name = (model_name or "").strip()
@@ -303,6 +318,13 @@ def create_job(
         save_upload(upload, image_path)
         image_paths.append(image_path)
 
+    lyrics_path = None
+    lyrics_name = None
+    if lyrics is not None:
+        lyrics_name = Path(lyrics.filename or "lyrics.txt").name
+        lyrics_path = uploads_dir / lyrics_name
+        save_upload(lyrics, lyrics_path)
+
     primary_image_name = image_paths[0].name
 
     with jobs_lock:
@@ -317,10 +339,12 @@ def create_job(
             "audio_filename": audio_name,
             "image_filename": primary_image_name,
             "image_filenames": [path.name for path in image_paths],
+            "lyrics_filename": lyrics_name,
             "song_title": song_title,
             "song_artist": song_artist,
             "video_style": video_style,
             "lip_sync_required": lip_sync,
+            "segment_name": segment_name,
             "model_name": resolved_model_name,
             "segment_length_seconds": segment_length_seconds,
             "final_video": None,
@@ -334,6 +358,7 @@ def create_job(
             job_id,
             audio_path,
             image_paths,
+            lyrics_path,
             str(PROMPT_PATH),
             resolved_model_name,
             segment_length_seconds,
@@ -341,6 +366,8 @@ def create_job(
             song_artist,
             video_style,
             lip_sync,
+            segment_name,
+            prompt_override,
         ),
         daemon=True,
     )

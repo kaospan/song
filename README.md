@@ -7,6 +7,7 @@ Tooling to turn a still image + track into a stitched vertical video (Hedra gene
 - Run pipeline: `.\.venv\Scripts\python.exe .\mirror_mouth_pipeline.py`
 - Run API server: `.\.venv\Scripts\python.exe .\api_server.py`
 - Run client: `cd client; npm ci; npm run dev`
+- Run API + client together: `npm install; npm run dev`
 
 **Credit-saving knobs** (all optional)
 - `RESUME_SESSION=video_segments/<session_folder>`: resume a partial run without re-generating completed segments.
@@ -22,3 +23,9 @@ Tooling to turn a still image + track into a stitched vertical video (Hedra gene
 - Leave `HEDRA_MODEL_NAME` blank and set defaults:
   - `DEFAULT_LIPSYNC_MODEL_NAME=Kling AI Avatar v2 Standard`
   - `DEFAULT_NON_LIPSYNC_MODEL_NAME=<a cheaper non-audio model name>`
+
+**Prompt segments (frontend)**
+- Prompt generation is modular in `client/src/basePrompt.ts` + `client/src/segments/*.ts`.
+- Add a new segment by creating `client/src/segments/<name>.ts` exporting `segment` and registering it in `client/src/segmentRegistry.ts`.
+- The UI assembles the final prompt as:
+  - `[baseQuote] + "\\n\\nSEGMENT: <name>" + "\\n\\n" + segmentContent + "\\n\\n" + segmentSuffix`

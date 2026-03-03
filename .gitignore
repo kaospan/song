@@ -202,6 +202,7 @@ cython_debug/
 .cursorindexingignore
 job_runs/
 client/dist/
+node_modules/
 
 # Local media (keep on disk, never commit)
 local_media/
@@ -213,6 +214,12 @@ local_media/
 *.jpg
 *.jpeg
 *.webp
+
+# Song-specific prompts/lyrics (keep local by default)
+*_lyrics.txt
+*_prompt*.txt
+under_my_skin_prompt
+!*mirror_mouth_prompt.txt
 segments/
 video_segments/
 final_videos/

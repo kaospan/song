@@ -107,6 +107,9 @@ FINAL_VIDEO_ARCHIVE_FOLDER = (
     normalize_env_path(os.environ.get("FINAL_VIDEO_ARCHIVE_FOLDER")) or "final_videos"
 )
 PROMPT_FILE = normalize_env_path(os.environ.get("PROMPT_FILE")) or "mirror_mouth_prompt.txt"
+LYRICS_FILE = normalize_env_path(os.environ.get("LYRICS_FILE"))
+LYRICS_SCENE_MODE = os.environ.get("LYRICS_SCENE_MODE", "1").strip().lower() in ("1", "true", "yes")
+LYRICS_MAX_LINES_PER_SEGMENT = int(os.environ.get("LYRICS_MAX_LINES_PER_SEGMENT", "4"))
 HEDRA_MODEL_NAME = os.environ.get("HEDRA_MODEL_NAME", "Kling AI Avatar v2 Standard").strip()
 DEFAULT_LIPSYNC_MODEL_NAME = os.environ.get(
     "DEFAULT_LIPSYNC_MODEL_NAME", "Kling AI Avatar v2 Standard"
@@ -194,6 +197,65 @@ def load_prompt_text(path):
 
     if not prompt_text:
         raise ValueError(f"Prompt file is empty: {path}")
+
+    return validate_prompt_text(prompt_text)
+
+
+def load_lyrics_text(path):
+    if not path:
+        return None
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Lyrics file not found: {path}")
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read().strip()
+    return text or None
+
+
+def normalize_lyrics_lines(lyrics_text):
+    if not lyrics_text:
+        return []
+    lines = []
+    for raw in lyrics_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(("#", "//")):
+            continue
+        lines.append(line)
+    return lines
+
+
+def distribute_lyrics(lines, segment_count, max_lines_per_segment):
+    if segment_count <= 0:
+        return []
+    if not lines:
+        return [""] * segment_count
+
+    # Evenly distribute lines across segments.
+    per_segment = max(1, math.ceil(len(lines) / segment_count))
+    per_segment = min(per_segment, max_lines_per_segment)
+    segments = []
+    cursor = 0
+    for _ in range(segment_count):
+        chunk = lines[cursor : cursor + per_segment]
+        cursor += per_segment
+        segments.append("\n".join(chunk))
+    # If we ran out of lines early, pad with empty strings.
+    if len(segments) < segment_count:
+        segments.extend([""] * (segment_count - len(segments)))
+    return segments[:segment_count]
+
+
+def format_time_range(idx, segment_length_seconds):
+    start = idx * segment_length_seconds
+    end = (idx + 1) * segment_length_seconds
+    return f"{start:02d}s-{end:02d}s"
+
+
+def validate_prompt_text(prompt_text):
+    prompt_text = (prompt_text or "").strip()
+    if not prompt_text:
+        raise ValueError("Prompt text is empty.")
     if len(prompt_text) > PROMPT_CHAR_LIMIT:
         raise ValueError(
             f"Prompt file exceeds {PROMPT_CHAR_LIMIT} characters: {len(prompt_text)}"
@@ -639,6 +701,19 @@ def save_segment_jobs(session_video_folder, segment_jobs):
     write_json_file(os.path.join(session_video_folder, "segment_jobs.json"), segment_jobs)
 
 
+def save_lyrics_segments(session_video_folder, segment_length_seconds, lyrics_by_segment):
+    payload = {
+        "segment_length_seconds": segment_length_seconds,
+        "segments": [
+            {"index": idx, "time_range": format_time_range(idx, segment_length_seconds), "lyrics": lyrics}
+            for idx, lyrics in enumerate(lyrics_by_segment)
+            if lyrics
+        ],
+        "created_at": datetime.now().isoformat(),
+    }
+    write_json_file(os.path.join(session_video_folder, "lyrics_segments.json"), payload)
+
+
 def stitch_video(video_files, manifest_path, final_video_name, audio_track_path=None):
     ffmpeg_bin = FFMPEG_PATH or "ffmpeg"
 
@@ -885,6 +960,10 @@ def run_pipeline(
     reuse_audio_asset=REUSE_AUDIO_ASSET,
     force_audio_upload=FORCE_AUDIO_UPLOAD,
     prompt_override=None,
+    lyrics_text=None,
+    lyrics_file=LYRICS_FILE,
+    lyrics_scene_mode=LYRICS_SCENE_MODE,
+    lyrics_max_lines_per_segment=LYRICS_MAX_LINES_PER_SEGMENT,
     lip_sync_required=LIP_SYNC_REQUIRED,
     default_lipsync_model_name=DEFAULT_LIPSYNC_MODEL_NAME,
     default_non_lipsync_model_name=DEFAULT_NON_LIPSYNC_MODEL_NAME,
@@ -959,6 +1038,15 @@ def run_pipeline(
             audio_files,
         )
     segment_count = len(audio_files)
+
+    if lyrics_text is None:
+        lyrics_text = load_lyrics_text(lyrics_file)
+    lyrics_lines = normalize_lyrics_lines(lyrics_text)
+    lyrics_by_segment = distribute_lyrics(
+        lyrics_lines,
+        segment_count,
+        max_lines_per_segment=max(1, int(lyrics_max_lines_per_segment)),
+    )
 
     if not resume_session and not session_label:
         latest_session_folder = get_latest_session_folder(output_video_root)
@@ -1061,6 +1149,8 @@ def run_pipeline(
             "fingerprint": fingerprint,
         },
     )
+    if lyrics_lines:
+        save_lyrics_segments(session_video_folder, segment_length_seconds, lyrics_by_segment)
 
     if not resume_session:
         reused_segments = reuse_complete_session_segments(
@@ -1226,18 +1316,35 @@ def run_pipeline(
         else:
             print("Model does not require audio; skipping audio upload.")
 
+        include_reference_images = (idx == 0 and len(image_asset_ids) > 1)
+
+        segment_lyrics = lyrics_by_segment[idx] if idx < len(lyrics_by_segment) else ""
+        segment_prompt = prompt_text
+        if segment_lyrics:
+            segment_prompt += (
+                f"\n\nSEGMENT: {idx:03d}"
+                f"\n\nLYRICS (for this segment; do not render as text):\n{segment_lyrics}"
+            )
+            if lyrics_scene_mode:
+                segment_prompt += (
+                    "\n\nScene direction: treat these lyrics as the emotional beat for this segment. "
+                    "You may introduce a subtle change in background set dressing or atmosphere between segments "
+                    "while keeping the camera locked and the subject identity stable. "
+                    "Never add any on-screen text."
+                )
+        segment_prompt = validate_prompt_text(segment_prompt)
+
         generation_payload = {
             "type": "video",
             "ai_model_id": model_id,
             "generated_video_inputs": {
-                "text_prompt": prompt_text,
+                "text_prompt": segment_prompt,
                 "duration_ms": audio_duration_ms,
                 "aspect_ratio": "9:16",
                 "resolution": "720p",
                 "enhance_prompt": False,
             },
         }
-        include_reference_images = (idx == 0 and len(image_asset_ids) > 1)
         if include_reference_images:
             generation_payload["reference_image_ids"] = image_asset_ids
         else:

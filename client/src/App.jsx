@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
+import { segments } from './segmentRegistry'
+import { buildPromptByName } from './promptBuilder'
 
 const ENV_API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 const STORAGE_API_BASE_KEY = 'mirrorMouthApiBaseUrl'
@@ -17,6 +19,7 @@ function App() {
   })
   const [songFile, setSongFile] = useState(null)
   const [imageFiles, setImageFiles] = useState([])
+  const [lyricsFile, setLyricsFile] = useState(null)
   const [songTitle, setSongTitle] = useState('')
   const [songArtist, setSongArtist] = useState('')
   const [job, setJob] = useState(null)
@@ -24,8 +27,7 @@ function App() {
   const [availableModels, setAvailableModels] = useState([])
   const [modelName, setModelName] = useState('')
   const [modelTouched, setModelTouched] = useState(false)
-  const [videoStyles, setVideoStyles] = useState([])
-  const [videoStyle, setVideoStyle] = useState('cinematic_studio')
+  const [segmentName, setSegmentName] = useState('cinematic_studio')
   const [lipSyncRequired, setLipSyncRequired] = useState(true)
   const [defaultLipSyncModelName, setDefaultLipSyncModelName] = useState('')
   const [defaultNonLipSyncModelName, setDefaultNonLipSyncModelName] = useState('')
@@ -41,6 +43,14 @@ function App() {
     return imageFiles.map((file) => URL.createObjectURL(file))
   }, [imageFiles])
 
+  const promptText = useMemo(() => {
+    try {
+      return buildPromptByName(segmentName)
+    } catch {
+      return ''
+    }
+  }, [segmentName])
+
   useEffect(() => {
     let isMounted = true
 
@@ -54,8 +64,10 @@ function App() {
         if (isMounted) {
           setDefaultModelName(payload.default_model_name ?? '')
           setModelName(payload.default_model_name ?? '')
-          setVideoStyles(payload.video_styles ?? [])
-          setVideoStyle(payload.default_video_style ?? 'cinematic_studio')
+          const nextDefaultSegment = payload.default_video_style ?? 'cinematic_studio'
+          if (Object.prototype.hasOwnProperty.call(segments, nextDefaultSegment)) {
+            setSegmentName(nextDefaultSegment)
+          }
           setLipSyncRequired(Boolean(payload.default_lip_sync_required ?? true))
           setDefaultLipSyncModelName(payload.default_lipsync_model_name ?? '')
           setDefaultNonLipSyncModelName(payload.default_non_lipsync_model_name ?? '')
@@ -162,6 +174,10 @@ function App() {
       setError('Choose an audio file and at least one reference image before starting.')
       return
     }
+    if (!promptText) {
+      setError('Selected prompt segment is invalid.')
+      return
+    }
 
     setError('')
     setIsSubmitting(true)
@@ -170,11 +186,16 @@ function App() {
       const formData = new FormData()
       formData.append('song', songFile)
       imageFiles.forEach((file) => formData.append('images', file))
+      if (lyricsFile) {
+        formData.append('lyrics', lyricsFile)
+      }
       formData.append('song_title', songTitle.trim())
       formData.append('song_artist', songArtist.trim())
       formData.append('model_name', modelName || defaultModelName)
-      formData.append('video_style', videoStyle)
+      formData.append('video_style', segmentName)
       formData.append('lip_sync_required', lipSyncRequired ? '1' : '0')
+      formData.append('segment_name', segmentName)
+      formData.append('prompt_override', promptText)
 
       const response = await fetch(apiUrl('/api/jobs'), {
         method: 'POST',
@@ -276,6 +297,19 @@ function App() {
           </label>
 
           <label className="field-card">
+            <span className="field-label">Lyrics (optional)</span>
+            <input
+              accept=".txt,text/plain"
+              type="file"
+              onChange={(event) => setLyricsFile(event.target.files?.[0] ?? null)}
+            />
+            <strong>{lyricsFile ? lyricsFile.name : 'No file selected'}</strong>
+            <p className="field-hint">
+              Used to bias segment prompts. Lyrics are never rendered as on-screen text.
+            </p>
+          </label>
+
+          <label className="field-card">
             <span className="field-label">Track title</span>
             <input
               placeholder="Enter the track title"
@@ -297,15 +331,21 @@ function App() {
 
           <label className="field-card">
             <span className="field-label">Video concept</span>
-            <select value={videoStyle} onChange={(event) => setVideoStyle(event.target.value)}>
-              {(videoStyles.length ? videoStyles : [{ value: 'cinematic_studio', label: 'Cinematic Studio' }]).map(
-                (style) => (
-                  <option key={style.value} value={style.value}>
-                    {style.label}
+            <select value={segmentName} onChange={(event) => setSegmentName(event.target.value)}>
+              {Object.keys(segments)
+                .sort()
+                .map((name) => (
+                  <option key={name} value={name}>
+                    {name.replaceAll('_', ' ')}
                   </option>
-                )
-              )}
+                ))}
             </select>
+            <p className="field-hint">Prompt length: {promptText.length} chars</p>
+            {promptText.length > 2500 ? (
+              <p className="warning-text">
+                Prompt exceeds 2500 chars; the backend will trim it. Consider shortening the base prompt or segment text.
+              </p>
+            ) : null}
           </label>
 
           <label className="field-card">
@@ -394,7 +434,7 @@ function App() {
               </div>
               <div>
                 <dt>Video type</dt>
-                <dd>{job.video_style || videoStyle}</dd>
+                <dd>{job.video_style || segmentName}</dd>
               </div>
               <div>
                 <dt>Model</dt>

@@ -1,0 +1,16 @@
+{
+  "name": "song",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n api,web -c green,cyan \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "node scripts/run_api.mjs",
+    "dev:web": "npm --prefix client run dev",
+    "build:web": "npm --prefix client run build",
+    "setup:web": "npm --prefix client install",
+    "setup:root": "npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
