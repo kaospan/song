@@ -21,3 +21,10 @@ def test_build_session_video_folder_creates_directory(tmp_path):
 
     assert Path(session_dir).exists()
     assert Path(session_dir).name == "session-123"
+
+
+def test_build_session_video_folder_reuses_resume_session(tmp_path):
+    session_dir = build_session_video_folder(str(tmp_path), resume_session="resume-me")
+
+    assert Path(session_dir).exists()
+    assert Path(session_dir).name == "resume-me"
