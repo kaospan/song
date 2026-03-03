@@ -500,6 +500,9 @@ def run_job(
         final_video=result["final_video"],
         session_video_folder=result["session_video_folder"],
         video_segments=result["video_segments"],
+        reused_cached_audio=result.get("reused_cached_audio", False),
+        reused_image_asset=result.get("reused_image_asset", False),
+        creative_assets=result.get("creative_assets"),
     )
 
 
@@ -613,6 +616,9 @@ def create_job(
             "final_video": None,
             "session_video_folder": None,
             "video_segments": [],
+            "reused_cached_audio": False,
+            "reused_image_asset": False,
+            "creative_assets": None,
         }
 
     thread = threading.Thread(

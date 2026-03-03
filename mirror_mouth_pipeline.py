@@ -296,12 +296,25 @@ def format_mmss(seconds):
     return f"{mm:02d}:{ss:02d}"
 
 
-def build_segment_timestamp_map(segment_count, segment_length_seconds):
+def build_segment_timestamp_map(segment_count, segment_length_seconds, segment_durations_ms=None):
+    """
+    Returns [{segment,start,end,timestamp}, ...] using real segment durations when available.
+    """
     segment_length_seconds = max(1, int(segment_length_seconds))
+    durations = []
+    if segment_durations_ms:
+        durations = [max(0, int(ms)) for ms in segment_durations_ms[:segment_count]]
+        if len(durations) < segment_count:
+            durations.extend([segment_length_seconds * 1000] * (segment_count - len(durations)))
+    else:
+        durations = [segment_length_seconds * 1000] * segment_count
+
     mapping = []
+    cursor_ms = 0
     for idx in range(segment_count):
-        start_s = idx * segment_length_seconds
-        end_s = min((idx + 1) * segment_length_seconds, segment_count * segment_length_seconds)
+        start_s = cursor_ms // 1000
+        cursor_ms += durations[idx]
+        end_s = cursor_ms // 1000
         mapping.append(
             {
                 "segment": idx + 1,
@@ -457,6 +470,7 @@ def generate_segment_prompt_assets(
     lyrics_text,
     lyrics_by_segment,
     segment_length_seconds,
+    segment_durations_ms=None,
     song_title=None,
     song_artist=None,
     video_style=None,
@@ -479,15 +493,26 @@ def generate_segment_prompt_assets(
     timestamp_map_path = os.path.join(creative_dir, "timestamp_map.json")
     lyrics_map_path = os.path.join(creative_dir, "lyrics_by_segment.json")
     segments_prompts_path = os.path.join(creative_dir, "segments_prompts.json")
+    # Convenience copies at the session root (keeps user-facing filenames predictable).
+    root_master_prompt_path = os.path.join(session_video_folder, "master_prompt.txt")
+    root_lyrics_path = os.path.join(session_video_folder, "lyrics.txt")
+    root_timestamp_map_path = os.path.join(session_video_folder, "timestamp_map.json")
+    root_segments_prompts_path = os.path.join(session_video_folder, "segments_prompts.json")
 
     write_text_file(master_prompt_path, master_prompt_text)
+    write_text_file(root_master_prompt_path, master_prompt_text)
     if lyrics_text:
         write_text_file(lyrics_path, lyrics_text)
+        write_text_file(root_lyrics_path, lyrics_text)
     else:
         write_text_file(lyrics_path, "")
+        write_text_file(root_lyrics_path, "")
 
-    timestamp_map = build_segment_timestamp_map(segment_count, segment_length_seconds)
+    timestamp_map = build_segment_timestamp_map(
+        segment_count, segment_length_seconds, segment_durations_ms=segment_durations_ms
+    )
     write_json_file(timestamp_map_path, timestamp_map)
+    write_json_file(root_timestamp_map_path, timestamp_map)
 
     lyrics_map = {
         f"segment_{idx+1:02d}": (lyrics_by_segment[idx] or "")
@@ -527,6 +552,7 @@ def generate_segment_prompt_assets(
         )
 
     payload = {
+        "MASTER_PROMPT": master_prompt_text.strip(),
         "video_style": video_style or "",
         "song_title": song_title or "",
         "song_artist": song_artist or "",
@@ -536,6 +562,7 @@ def generate_segment_prompt_assets(
         "segments": segments,
     }
     write_json_file(segments_prompts_path, payload)
+    write_json_file(root_segments_prompts_path, payload)
 
     return {
         "creative_dir": os.path.abspath(creative_dir),
@@ -544,6 +571,10 @@ def generate_segment_prompt_assets(
         "timestamp_map_path": os.path.abspath(timestamp_map_path),
         "lyrics_map_path": os.path.abspath(lyrics_map_path),
         "segments_prompts_path": os.path.abspath(segments_prompts_path),
+        "root_master_prompt_path": os.path.abspath(root_master_prompt_path),
+        "root_lyrics_path": os.path.abspath(root_lyrics_path),
+        "root_timestamp_map_path": os.path.abspath(root_timestamp_map_path),
+        "root_segments_prompts_path": os.path.abspath(root_segments_prompts_path),
     }
 
 
@@ -1324,6 +1355,7 @@ def run_pipeline(
         lyrics_text,
         lyrics_by_segment,
         segment_length_seconds,
+        segment_durations_ms=[dur for _, dur in audio_files],
         song_title=song_title,
         song_artist=song_artist,
     )
@@ -1469,6 +1501,7 @@ def run_pipeline(
                 "video_segments": [os.path.abspath(path) for path in expected_videos],
                 "reused_cached_audio": reused_cached_audio,
                 "reused_image_asset": False,
+                "creative_assets": creative_assets,
             }
 
     asset_cache = load_asset_cache(image_asset_cache_path) if image_asset_cache_path else None
@@ -1764,6 +1797,9 @@ def run_pipeline(
         "session_video_folder": os.path.abspath(session_video_folder),
         "videos_manifest": os.path.abspath(videos_manifest_path),
         "video_segments": [os.path.abspath(path) for path in video_files],
+        "reused_cached_audio": reused_cached_audio,
+        "reused_image_asset": reused_image_asset,
+        "creative_assets": creative_assets,
     }
 
 
