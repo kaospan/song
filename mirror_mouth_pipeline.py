@@ -469,6 +469,14 @@ def save_asset_cache(cache_path, cache):
     write_json_file(cache_path, cache)
 
 
+def load_segment_jobs(session_video_folder):
+    return load_json_file(os.path.join(session_video_folder, "segment_jobs.json")) or {}
+
+
+def save_segment_jobs(session_video_folder, segment_jobs):
+    write_json_file(os.path.join(session_video_folder, "segment_jobs.json"), segment_jobs)
+
+
 def stitch_video(video_files, manifest_path, final_video_name):
     ffmpeg_bin = FFMPEG_PATH or "ffmpeg"
 
@@ -691,6 +699,12 @@ def run_pipeline(
         )
     segment_count = len(audio_files)
 
+    prompt_text = validate_prompt_text(prompt_override) if prompt_override else load_prompt_text(prompt_file)
+    model = resolve_model(model_name)
+    model_id = model["id"]
+    print("Using prompt file:", prompt_file)
+    print("Using model:", model_name, model_id)
+
     if not resume_session and not session_label:
         latest_session_folder = get_latest_session_folder(output_video_root)
         if latest_session_folder and has_all_video_segments(latest_session_folder, segment_count):
@@ -754,14 +768,9 @@ def run_pipeline(
             }
             save_asset_cache(image_asset_cache_path, cache)
 
-    prompt_text = load_prompt_text(prompt_file)
-    model = resolve_model(model_name)
-    model_id = model["id"]
-    print("Using prompt file:", prompt_file)
-    print("Using model:", model_name, model_id)
-
     video_files = []
     current_start_keyframe_id = image_asset_id
+    segment_jobs = load_segment_jobs(session_video_folder)
 
     for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
         print(f"\nProcessing segment {idx + 1}/{len(audio_files)}")
@@ -777,6 +786,47 @@ def run_pipeline(
                     session_video_folder,
                 )
             continue
+
+        segment_key = f"{idx:03}"
+        job_entry = segment_jobs.get(segment_key)
+        if job_entry and job_entry.get("job_id"):
+            print("Found existing job for segment", segment_key, "- checking status...")
+            status_url = f"{API_BASE}/generations/{job_entry['job_id']}/status"
+            try:
+                status_json = poll_generation_status(status_url)
+                output = status_json.get("output", {})
+                video_url = (
+                    output.get("video_url")
+                    or status_json.get("download_url")
+                    or status_json.get("url")
+                    or status_json.get("streaming_url")
+                )
+                if not video_url:
+                    raise RuntimeError("No video_url returned for existing job")
+
+                print("Downloading video for existing job...")
+                download_video_file(video_url, video_path)
+                video_files.append(video_path)
+                print("Saved:", video_path)
+
+                segment_jobs[segment_key]["status"] = "complete"
+                segment_jobs[segment_key]["video_path"] = video_path
+                save_segment_jobs(session_video_folder, segment_jobs)
+
+                if idx < len(audio_files) - 1:
+                    current_start_keyframe_id = upload_continuity_frame(
+                        video_path,
+                        idx,
+                        session_video_folder,
+                    )
+                if request_delay_seconds > 0:
+                    print(f"Waiting {request_delay_seconds} seconds (rate limit buffer)...")
+                    time.sleep(request_delay_seconds)
+                continue
+            except Exception as exc:
+                print("Existing job could not be used, will create a new one:", exc)
+                segment_jobs.pop(segment_key, None)
+                save_segment_jobs(session_video_folder, segment_jobs)
 
         print("Uploading audio segment:", audio_file)
         audio_asset_id = upload_asset(
@@ -830,6 +880,15 @@ def run_pipeline(
             raise Exception(f"No job_id returned: {generation_data}")
 
         print("Generation started. Job ID:", job_id)
+        segment_jobs[segment_key] = {
+            "job_id": job_id,
+            "audio_file": os.path.abspath(audio_file),
+            "duration_ms": audio_duration_ms,
+            "model_id": model_id,
+            "created_at": datetime.now().isoformat(),
+            "status": "submitted",
+        }
+        save_segment_jobs(session_video_folder, segment_jobs)
 
         status_url = f"{API_BASE}/generations/{job_id}/status"
 
@@ -851,6 +910,9 @@ def run_pipeline(
 
         video_files.append(video_path)
         print("Saved:", video_path)
+        segment_jobs[segment_key]["status"] = "complete"
+        segment_jobs[segment_key]["video_path"] = video_path
+        save_segment_jobs(session_video_folder, segment_jobs)
 
         if idx < len(audio_files) - 1:
             current_start_keyframe_id = upload_continuity_frame(
