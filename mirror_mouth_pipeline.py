@@ -74,9 +74,14 @@ PROMPT_FILE = normalize_env_path(os.environ.get("PROMPT_FILE")) or "mirror_mouth
 HEDRA_MODEL_NAME = os.environ.get("HEDRA_MODEL_NAME", "Kling V3 Standard I2V").strip()
 REQUEST_DELAY_SECONDS = float(os.environ.get("REQUEST_DELAY_SECONDS", "60"))
 STATUS_POLL_INTERVAL_SECONDS = float(os.environ.get("STATUS_POLL_INTERVAL_SECONDS", "10"))
+QUEUED_STATUS_SLEEP_SECONDS = float(os.environ.get("QUEUED_STATUS_SLEEP_SECONDS", "120"))
 STATUS_TIMEOUT_SECONDS = float(os.environ.get("STATUS_TIMEOUT_SECONDS", "60"))
 STATUS_RETRY_LIMIT = int(os.environ.get("STATUS_RETRY_LIMIT", "10"))
 STATUS_RETRY_BACKOFF_SECONDS = float(os.environ.get("STATUS_RETRY_BACKOFF_SECONDS", "10"))
+DOWNLOAD_TIMEOUT_SECONDS = float(os.environ.get("DOWNLOAD_TIMEOUT_SECONDS", "120"))
+DOWNLOAD_RETRY_LIMIT = int(os.environ.get("DOWNLOAD_RETRY_LIMIT", "5"))
+DOWNLOAD_RETRY_BACKOFF_SECONDS = float(os.environ.get("DOWNLOAD_RETRY_BACKOFF_SECONDS", "10"))
+RESUME_SESSION = normalize_env_path(os.environ.get("RESUME_SESSION"))
 SESSION_LABEL = os.environ.get("SESSION_LABEL")
 
 API_BASE = "https://api.hedra.com/web-app/public"
@@ -194,8 +199,16 @@ def upload_asset(path, name=None, mime=None, type_="image"):
     return asset_id
 
 
-def build_session_video_folder(output_video_root, session_label=None):
+def build_session_video_folder(output_video_root, session_label=None, resume_session=None):
     os.makedirs(output_video_root, exist_ok=True)
+
+    if resume_session:
+        if os.path.isabs(resume_session):
+            session_folder = resume_session
+        else:
+            session_folder = os.path.join(output_video_root, resume_session)
+        os.makedirs(session_folder, exist_ok=True)
+        return session_folder
 
     session_name = session_label or datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
     session_folder = os.path.join(output_video_root, session_name)
@@ -301,7 +314,50 @@ def poll_generation_status(status_url):
         if status in ("failed", "error"):
             raise Exception(f"Generation failed: {json.dumps(status_json, indent=2)}")
 
-        time.sleep(STATUS_POLL_INTERVAL_SECONDS)
+        if status == "queued":
+            print(f"Queued. Sleeping {QUEUED_STATUS_SLEEP_SECONDS} seconds before retrying...")
+            time.sleep(QUEUED_STATUS_SLEEP_SECONDS)
+        else:
+            time.sleep(STATUS_POLL_INTERVAL_SECONDS)
+
+
+def download_video_file(video_url, video_path):
+    temp_path = f"{video_path}.part"
+
+    for attempt in range(1, DOWNLOAD_RETRY_LIMIT + 1):
+        try:
+            with requests.get(video_url, stream=True, timeout=DOWNLOAD_TIMEOUT_SECONDS) as vid_resp:
+                if 400 <= vid_resp.status_code < 500:
+                    raise_with_body(vid_resp)
+                if not vid_resp.ok:
+                    raise requests.HTTPError(
+                        f"Unexpected status {vid_resp.status_code} while downloading video",
+                        response=vid_resp,
+                    )
+
+                with open(temp_path, "wb") as f:
+                    for chunk in vid_resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+
+            os.replace(temp_path, video_path)
+            return
+        except requests.exceptions.RequestException as exc:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+            if attempt >= DOWNLOAD_RETRY_LIMIT:
+                raise RuntimeError(
+                    f"Video download failed after {DOWNLOAD_RETRY_LIMIT} attempts: {exc}"
+                ) from exc
+
+            retry_delay = min(DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt, 60)
+            print(
+                "Video download failed "
+                f"({attempt}/{DOWNLOAD_RETRY_LIMIT}): {exc}. "
+                f"Retrying in {retry_delay} seconds..."
+            )
+            time.sleep(retry_delay)
 
 
 def run_pipeline(
@@ -314,6 +370,7 @@ def run_pipeline(
     prompt_file=PROMPT_FILE,
     model_name=HEDRA_MODEL_NAME,
     request_delay_seconds=REQUEST_DELAY_SECONDS,
+    resume_session=RESUME_SESSION,
     session_label=SESSION_LABEL,
 ):
     if not os.path.exists(input_mp3):
@@ -321,7 +378,11 @@ def run_pipeline(
     if not os.path.exists(reference_image):
         raise FileNotFoundError(f"Reference image not found: {reference_image}")
 
-    session_video_folder = build_session_video_folder(output_video_root, session_label=session_label)
+    session_video_folder = build_session_video_folder(
+        output_video_root,
+        session_label=session_label,
+        resume_session=resume_session,
+    )
     videos_manifest_path = os.path.join(session_video_folder, "videos.txt")
 
     print("Session video folder:", session_video_folder)
@@ -346,6 +407,12 @@ def run_pipeline(
 
     for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
         print(f"\nProcessing segment {idx + 1}/{len(audio_files)}")
+        video_path = os.path.join(session_video_folder, f"video_{idx:03}.mp4")
+
+        if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+            print("Skipping existing video segment:", video_path)
+            video_files.append(video_path)
+            continue
 
         print("Uploading audio segment:", audio_file)
         audio_asset_id = upload_asset(
@@ -404,17 +471,8 @@ def run_pipeline(
         if not video_url:
             raise Exception("No video_url returned")
 
-        video_path = os.path.join(session_video_folder, f"video_{idx:03}.mp4")
-
         print("Downloading video...")
-        with requests.get(video_url, headers=get_headers(), stream=True, timeout=120) as vid_resp:
-            if not vid_resp.ok:
-                raise_with_body(vid_resp)
-
-            with open(video_path, "wb") as f:
-                for chunk in vid_resp.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
+        download_video_file(video_url, video_path)
 
         video_files.append(video_path)
         print("Saved:", video_path)
