@@ -37,6 +37,98 @@ USERS_DIR.mkdir(exist_ok=True)
 PROMPT_PATH = Path(PROMPT_FILE)
 if not PROMPT_PATH.is_absolute():
     PROMPT_PATH = (BASE_DIR / PROMPT_PATH).resolve()
+PROMPT_HISTORY_PATH = JOB_ROOT / "prompt_history.json"
+
+VIDEO_STYLE_PRESETS = {
+    "cinematic_studio": {
+        "label": "Cinematic Studio Close-Up",
+        "description": "Clean, controlled, high-end studio performance. Stable framing, premium lighting, minimal movement.",
+        "direction": (
+            "Setting: controlled studio or void background.\n"
+            "Lighting: cinematic key + soft fill, stable exposure, no flicker.\n"
+            "Camera: locked or very subtle stabilized motion; keep subject size consistent.\n"
+            "Texture: photoreal skin detail, mild film grain.\n"
+            "Editing rhythm: steady, confident, performance-first."
+        ),
+    },
+    "noir_minimal": {
+        "label": "Noir Minimal",
+        "description": "Moody, high-contrast shadows with restrained motion and psychological tension. Minimal set dressing.",
+        "direction": (
+            "Setting: minimalist dark environment, sparse background.\n"
+            "Lighting: hard key, deep shadow, controlled highlights; no exposure drift.\n"
+            "Camera: locked tripod close-up; no reframing.\n"
+            "Texture: crisp contrast, subtle grain.\n"
+            "Editing rhythm: slow-burn, tension builds through micro-changes."
+        ),
+    },
+    "neon_rain": {
+        "label": "Neon Rain",
+        "description": "Modern neon nightlife vibe: wet reflections, colored bokeh, glossy highlights, cinematic contrast.",
+        "direction": (
+            "Setting: night city bokeh, wet surfaces, practical neon.\n"
+            "Lighting: colored rim lights (cyan/magenta/amber), controlled specular highlights.\n"
+            "Camera: stabilized glide or gentle orbit; keep continuity.\n"
+            "Texture: shallow depth of field, atmospheric haze.\n"
+            "Editing rhythm: slightly quicker on choruses, calmer on verses."
+        ),
+    },
+    "surreal_sketch": {
+        "label": "Surreal Sketch Overlay",
+        "description": "Photoreal base with subtle, tasteful pencil/ink overlays that escalate with the song’s intensity.",
+        "direction": (
+            "Setting: real environment kept simple so overlays read clearly.\n"
+            "Lighting: cinematic HDR, stable exposure.\n"
+            "Camera: stabilized motion; avoid jitter so overlays track cleanly.\n"
+            "Anomalies: 1–2 frame sketch artifacts, ink veins, outline flickers; never text-like.\n"
+            "Editing rhythm: anomalies peak on hooks, recede on quiet lines."
+        ),
+    },
+    "high_fashion_editorial": {
+        "label": "High Fashion Editorial",
+        "description": "Premium editorial look: clean compositions, confident pacing, iconic lighting, luxury texture.",
+        "direction": (
+            "Setting: minimalist set, architectural shapes, premium styling.\n"
+            "Lighting: soft key + strong edge/rim, glossy highlights, controlled shadows.\n"
+            "Camera: deliberate dolly pushes or slow orbit; no shake.\n"
+            "Texture: high detail, tasteful grain.\n"
+            "Editing rhythm: clean, punchy cuts at musical accents."
+        ),
+    },
+    "documentary_grit": {
+        "label": "Documentary Grit",
+        "description": "Raw and intimate realism. Natural light, subtle handheld energy, grounded emotional read.",
+        "direction": (
+            "Setting: real locations, imperfect textures.\n"
+            "Lighting: naturalistic, motivated practicals.\n"
+            "Camera: gentle handheld or shoulder-rig feel (minimal jitter), human proximity.\n"
+            "Texture: slight noise, authentic contrast.\n"
+            "Editing rhythm: reactive to phrasing, breath, and pauses."
+        ),
+    },
+    "dream_haze": {
+        "label": "Dream Haze",
+        "description": "Ethereal, emotional, soft bloom and haze. Feels like a memory: warm highlights, gentle motion.",
+        "direction": (
+            "Setting: abstracted, softened backgrounds; dreamy atmosphere.\n"
+            "Lighting: bloom-y highlights, gentle falloff; no clipping.\n"
+            "Camera: slow drift, stabilized; no sharp movements.\n"
+            "Texture: soft film grain, subtle halation.\n"
+            "Editing rhythm: breathy, lyrical, dissolves feel natural."
+        ),
+    },
+    "glitch_modern": {
+        "label": "Modern Glitch (Tasteful)",
+        "description": "Clean modern base with rare, tasteful glitch moments timed to impact. No on-screen text artifacts.",
+        "direction": (
+            "Setting: modern, graphic shapes and light sources.\n"
+            "Lighting: crisp, controlled contrast.\n"
+            "Camera: stabilized; keep geometry consistent.\n"
+            "Anomalies: micro-glitches (1–2 frames), chromatic split, frame stutter; never captions/timecode.\n"
+            "Editing rhythm: impact moments only; do not overuse."
+        ),
+    },
+}
 
 jobs = {}
 jobs_lock = threading.Lock()
@@ -346,32 +438,38 @@ def append_prompt_history(entry):
     save_prompt_history(entries)
 
 
-def build_prompt(base_prompt, video_style):
-    preset = VIDEO_STYLE_PRESETS.get(video_style)
-    if not preset:
-        return base_prompt
-    return f"{base_prompt}\n\n{preset['text']}"
+def build_master_prompt(video_style: str, lip_sync_required: bool) -> str:
+    """
+    Content-agnostic "master direction" prompt assembled from the selected concept.
+    This is intentionally generic: identity and composition are driven by uploaded reference images.
+    """
+    preset = VIDEO_STYLE_PRESETS.get(video_style) or VIDEO_STYLE_PRESETS["cinematic_studio"]
+    label = preset.get("label", "Video concept")
+    description = preset.get("description", "")
+    direction = preset.get("direction", "").strip()
 
-def remove_lipsync_instructions(prompt_text):
-    lines = (prompt_text or "").splitlines()
-    filtered = []
-    for line in lines:
-        if line.strip().lower().startswith("lip sync:"):
-            continue
-        filtered.append(line)
+    lipsync_block = ""
+    if lip_sync_required:
+        lipsync_block = (
+            "Lip sync: strict audio-driven lip sync. Every audible lyric/syllable must match visible mouth articulation. "
+            "No invented words, no invented singing, and do not desync on sustained notes."
+        )
+    else:
+        lipsync_block = (
+            "Audio: do not generate vocals. The original audio track will be added in post. "
+            "Do not animate speech-like mouth motion unless clearly motivated by the intended scene."
+        )
 
-    prompt_text = "\n".join(filtered).strip()
-    prompt_text = prompt_text.replace("lip-synced", "music video")
-    prompt_text = prompt_text.replace("lip‑synced", "music video")
-    prompt_text += "\n\nAudio: do not generate vocals; the final audio track will be added in post."
-    return prompt_text
-
-
-def build_prompt_with_options(base_prompt, video_style, lip_sync_required):
-    prompt_text = build_prompt(base_prompt, video_style)
-    if not lip_sync_required:
-        prompt_text = remove_lipsync_instructions(prompt_text)
-    return prompt_text
+    return (
+        f"VIDEO CONCEPT: {label}\n"
+        f"{description}\n\n"
+        "Identity & continuity: use the provided reference image(s) as the exact identity and composition anchor. "
+        "Preserve the same person and framing across segments; no resets.\n"
+        "Text/artifacts: no subtitles, lyrics, captions, logos, watermarks, letters, numbers, UI overlays, or gibberish marks.\n"
+        f"{lipsync_block}\n\n"
+        f"Direction (global):\n{direction}\n\n"
+        "Segment continuity: the first frame of each segment must seamlessly continue from the last frame of the previous segment."
+    ).strip()
 
 
 def fetch_models_metadata():
@@ -451,8 +549,7 @@ def run_job(
         if prompt_override:
             prompt_text = str(prompt_override)
         else:
-            base_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-            prompt_text = build_prompt_with_options(base_prompt, video_style, lip_sync_required)
+            prompt_text = build_master_prompt(video_style, lip_sync_required)
         result = run_pipeline(
             input_mp3=str(audio_path),
             reference_images=[str(path) for path in image_paths],
@@ -524,6 +621,15 @@ def config():
         "default_non_lipsync_model_name": default_non_lipsync_model_name,
         "default_lip_sync_required": True,
         "prompt_file": str(PROMPT_PATH),
+        "video_styles": [
+            {
+                "value": key,
+                "label": preset.get("label", key),
+                "description": preset.get("description", ""),
+            }
+            for key, preset in VIDEO_STYLE_PRESETS.items()
+        ],
+        "default_video_style": "cinematic_studio",
     }
 
 

@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
-import { segments } from './segmentRegistry'
-import { buildPromptByName } from './promptBuilder'
 
 const ENV_API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 const STORAGE_API_BASE_KEY = 'songVideoApiBaseUrl'
@@ -10,7 +8,6 @@ const STORAGE_AUTH_USER_KEY = 'songVideoAuthUser'
 
 // Avoid collisions with other local dev backends that commonly use 8000.
 const DEFAULT_DEV_API_BASE = 'http://127.0.0.1:8001'
-const PROMPT_CHAR_SOFT_LIMIT = 2500
 
 function normalizeApiBase(value) {
   const trimmed = String(value ?? '').trim()
@@ -70,7 +67,8 @@ function App() {
   const [availableModels, setAvailableModels] = useState([])
   const [modelName, setModelName] = useState('')
   const [modelTouched, setModelTouched] = useState(false)
-  const [segmentName, setSegmentName] = useState('cinematic_studio')
+  const [videoStyles, setVideoStyles] = useState([])
+  const [videoStyle, setVideoStyle] = useState('cinematic_studio')
   const [lipSyncRequired, setLipSyncRequired] = useState(true)
   const [defaultLipSyncModelName, setDefaultLipSyncModelName] = useState('')
   const [defaultNonLipSyncModelName, setDefaultNonLipSyncModelName] = useState('')
@@ -79,13 +77,13 @@ function App() {
 
   const authHeaders = useMemo(() => (authToken ? { Authorization: `Bearer ${authToken}` } : {}), [authToken])
 
-  const promptText = useMemo(() => {
-    try {
-      return buildPromptByName(segmentName)
-    } catch {
-      return ''
-    }
-  }, [segmentName])
+  const selectedVideoStyle = useMemo(() => {
+    return (
+      videoStyles.find((style) => style.value === videoStyle) ||
+      videoStyles.find((style) => style.value === 'cinematic_studio') ||
+      null
+    )
+  }, [videoStyles, videoStyle])
 
   const mixedContentRisk = useMemo(() => {
     if (typeof window === 'undefined') return false
@@ -136,8 +134,9 @@ function App() {
         if (cancelled) return
         setDefaultModelName(payload.default_model_name ?? '')
         setModelName(payload.default_model_name ?? '')
-        const nextDefaultSegment = payload.default_video_style ?? 'cinematic_studio'
-        if (Object.prototype.hasOwnProperty.call(segments, nextDefaultSegment)) setSegmentName(nextDefaultSegment)
+        const nextDefaultStyle = payload.default_video_style ?? 'cinematic_studio'
+        setVideoStyles(Array.isArray(payload.video_styles) ? payload.video_styles : [])
+        setVideoStyle(nextDefaultStyle)
         setLipSyncRequired(Boolean(payload.default_lip_sync_required ?? true))
         setDefaultLipSyncModelName(payload.default_lipsync_model_name ?? '')
         setDefaultNonLipSyncModelName(payload.default_non_lipsync_model_name ?? '')
@@ -267,10 +266,6 @@ function App() {
       setError('Choose an audio file and at least one reference image.')
       return
     }
-    if (!promptText) {
-      setError('Selected video concept is invalid.')
-      return
-    }
 
     setError('')
     setIsSubmitting(true)
@@ -282,10 +277,9 @@ function App() {
       formData.append('song_title', songTitle.trim())
       formData.append('song_artist', songArtist.trim())
       formData.append('model_name', modelName || defaultModelName)
-      formData.append('video_style', segmentName)
+      formData.append('video_style', videoStyle)
       formData.append('lip_sync_required', lipSyncRequired ? '1' : '0')
-      formData.append('segment_name', segmentName)
-      formData.append('prompt_override', promptText)
+      formData.append('segment_name', videoStyle)
 
       const resp = await fetch(`${apiBase}/api/jobs`, { method: 'POST', body: formData, headers: { ...authHeaders } })
       const payload = await resp.json()
@@ -466,23 +460,21 @@ function App() {
 
           <label className="field-card">
             <span className="field-label">Video concept</span>
-            <select value={segmentName} onChange={(e) => setSegmentName(e.target.value)}>
-              {Object.keys(segments)
-                .sort()
-                .map((name) => (
-                  <option key={name} value={name}>
-                    {prettyLabel(name)}
+            <select value={videoStyle} onChange={(e) => setVideoStyle(e.target.value)}>
+              {(videoStyles.length ? videoStyles : [{ value: 'cinematic_studio', label: 'Cinematic Studio Close-Up' }])
+                .slice()
+                .sort((a, b) => String(a.label || a.value).localeCompare(String(b.label || b.value)))
+                .map((style) => (
+                  <option key={style.value} value={style.value}>
+                    {style.label || prettyLabel(style.value)}
                   </option>
                 ))}
             </select>
-            <p className="field-hint">Prompt length: {promptText.length} chars</p>
-            {promptText.length > PROMPT_CHAR_SOFT_LIMIT ? (
-              <p className="warning-text">Prompt exceeds {PROMPT_CHAR_SOFT_LIMIT} chars; the backend may trim it.</p>
-            ) : null}
-            <details className="prompt-preview">
-              <summary>Preview prompt</summary>
-              <pre className="prompt-preview-body">{promptText}</pre>
-            </details>
+            {selectedVideoStyle?.description ? (
+              <p className="field-hint">{selectedVideoStyle.description}</p>
+            ) : (
+              <p className="field-hint">Pick a vibe preset. The backend generates a master direction + segment prompts automatically.</p>
+            )}
           </label>
 
           <label className="field-card">
@@ -552,7 +544,7 @@ function App() {
               </div>
               <div>
                 <dt>Concept</dt>
-                <dd>{prettyLabel(job.video_style || segmentName)}</dd>
+                <dd>{prettyLabel(job.video_style || videoStyle)}</dd>
               </div>
               <div>
                 <dt>Model</dt>
