@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
 import shutil
 import threading
 import traceback
@@ -6,9 +12,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
+import requests
 
 from mirror_mouth_pipeline import (
     API_BASE,
@@ -23,6 +31,9 @@ from mirror_mouth_pipeline import (
 BASE_DIR = Path(__file__).resolve().parent
 JOB_ROOT = BASE_DIR / "job_runs"
 JOB_ROOT.mkdir(exist_ok=True)
+USERS_DB_PATH = JOB_ROOT / "users.json"
+USERS_DIR = JOB_ROOT / "users"
+USERS_DIR.mkdir(exist_ok=True)
 PROMPT_PATH = Path(PROMPT_FILE)
 if not PROMPT_PATH.is_absolute():
     PROMPT_PATH = (BASE_DIR / PROMPT_PATH).resolve()
@@ -38,6 +49,254 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+AUTH_ENABLED = str(os.environ.get("AUTH_ENABLED", "0")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+AUTH_ALLOW_REGISTER = str(os.environ.get("AUTH_ALLOW_REGISTER", "1")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+AUTH_TOKEN_TTL_HOURS = int(os.environ.get("AUTH_TOKEN_TTL_HOURS", "168"))
+DEFAULT_USER = "default"
+
+sessions = {}
+sessions_lock = threading.Lock()
+
+
+class AuthRequest(BaseModel):
+    username: str
+    password: str
+
+
+class SettingsPayload(BaseModel):
+    settings: dict
+
+
+def normalize_username(value: str) -> str:
+    username = (value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{3,32}", username):
+        raise HTTPException(
+            status_code=422,
+            detail="Username must be 3-32 characters of letters, numbers, underscore, or hyphen.",
+        )
+    return username
+
+
+def ensure_users_db():
+    if not USERS_DB_PATH.exists():
+        USERS_DB_PATH.write_text(json.dumps({"users": {}}, indent=2), encoding="utf-8")
+
+
+def load_users_db():
+    ensure_users_db()
+    try:
+        return json.loads(USERS_DB_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"users": {}}
+
+
+def save_users_db(db):
+    USERS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = USERS_DB_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(db, indent=2), encoding="utf-8")
+    tmp.replace(USERS_DB_PATH)
+
+
+def user_dir(username: str) -> Path:
+    return USERS_DIR / username
+
+
+def user_settings_path(username: str) -> Path:
+    return user_dir(username) / "settings.json"
+
+
+def user_prompt_history_path(username: str) -> Path:
+    return user_dir(username) / "prompt_history.json"
+
+
+def pbkdf2_hash_password(password: str, salt_hex: str, iterations: int = 200_000) -> str:
+    salt = bytes.fromhex(salt_hex)
+    derived = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return derived.hex()
+
+
+def verify_password(password: str, salt_hex: str, expected_hash_hex: str) -> bool:
+    calculated = pbkdf2_hash_password(password, salt_hex)
+    return hmac.compare_digest(calculated, expected_hash_hex)
+
+
+def create_session(username: str) -> str:
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc).timestamp() + (AUTH_TOKEN_TTL_HOURS * 3600)
+    with sessions_lock:
+        sessions[token] = {"username": username, "expires_at": expires_at}
+    return token
+
+
+def get_current_user(
+    authorization: str | None = Header(default=None),
+) -> str | None:
+    if not AUTH_ENABLED:
+        return None
+
+    auth = (authorization or "").strip()
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token.")
+
+    token = auth.split(None, 1)[1].strip()
+    with sessions_lock:
+        session = sessions.get(token)
+
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+    if datetime.now(timezone.utc).timestamp() > float(session.get("expires_at", 0)):
+        with sessions_lock:
+            sessions.pop(token, None)
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+    return session["username"]
+
+
+def require_user(user: str | None = Depends(get_current_user)) -> str:
+    if AUTH_ENABLED and not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    return user or DEFAULT_USER
+
+
+def load_user_settings(username: str) -> dict:
+    path = user_settings_path(username)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_user_settings(username: str, settings: dict):
+    d = user_dir(username)
+    d.mkdir(parents=True, exist_ok=True)
+    path = user_settings_path(username)
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
+def load_user_prompt_history(username: str) -> list[dict]:
+    path = user_prompt_history_path(username)
+    if not path.exists():
+        return []
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+
+
+def append_user_prompt_history(username: str, entry: dict):
+    d = user_dir(username)
+    d.mkdir(parents=True, exist_ok=True)
+    entries = load_user_prompt_history(username)
+    entries.append(entry)
+    user_prompt_history_path(username).write_text(
+        json.dumps(entries, indent=2), encoding="utf-8"
+    )
+
+
+@app.get("/api/auth/config")
+def auth_config():
+    return {
+        "auth_enabled": AUTH_ENABLED,
+        "allow_register": AUTH_ALLOW_REGISTER,
+        "token_ttl_hours": AUTH_TOKEN_TTL_HOURS,
+    }
+
+
+@app.post("/api/auth/register")
+def auth_register(payload: AuthRequest):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=409, detail="Auth is disabled on this server.")
+    if not AUTH_ALLOW_REGISTER:
+        raise HTTPException(
+            status_code=403, detail="Registration is disabled on this server."
+        )
+
+    username = normalize_username(payload.username)
+    password = str(payload.password or "")
+    if len(password) < 8:
+        raise HTTPException(
+            status_code=422, detail="Password must be at least 8 characters."
+        )
+
+    db = load_users_db()
+    users = db.setdefault("users", {})
+    if username in users:
+        raise HTTPException(status_code=409, detail="Username already exists.")
+
+    salt_hex = secrets.token_hex(16)
+    users[username] = {
+        "created_at": iso_now(),
+        "salt": salt_hex,
+        "password_hash": pbkdf2_hash_password(password, salt_hex),
+    }
+    save_users_db(db)
+
+    # Initialize per-user files
+    save_user_settings(username, {})
+    user_prompt_history_path(username).write_text("[]", encoding="utf-8")
+
+    token = create_session(username)
+    return {"token": token, "username": username}
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: AuthRequest):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=409, detail="Auth is disabled on this server.")
+
+    username = normalize_username(payload.username)
+    password = str(payload.password or "")
+
+    db = load_users_db()
+    user = (db.get("users") or {}).get(username)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    if not verify_password(password, user.get("salt", ""), user.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    token = create_session(username)
+    return {"token": token, "username": username}
+
+
+@app.get("/api/user")
+def get_user(username: str = Depends(require_user)):
+    return {"username": username, "settings": load_user_settings(username)}
+
+
+@app.get("/api/user/settings")
+def get_user_settings(username: str = Depends(require_user)):
+    return {"settings": load_user_settings(username)}
+
+
+@app.put("/api/user/settings")
+def put_user_settings(payload: SettingsPayload, username: str = Depends(require_user)):
+    settings = payload.settings or {}
+    if not isinstance(settings, dict):
+        raise HTTPException(status_code=422, detail="settings must be an object.")
+    save_user_settings(username, settings)
+    return {"settings": settings}
+
+
+@app.get("/api/user/prompts")
+def get_user_prompts(limit: int = 50, username: str = Depends(require_user)):
+    limit = max(1, min(int(limit or 50), 500))
+    entries = load_user_prompt_history(username)
+    return {"prompts": list(reversed(entries[-limit:]))}
 
 
 def iso_now():
@@ -158,6 +417,7 @@ def pick_default_model_name(models, require_audio_input):
 
 
 def run_job(
+    username,
     job_id,
     audio_path,
     image_paths,
@@ -218,7 +478,8 @@ def run_job(
         )
         return
 
-    append_prompt_history(
+    append_user_prompt_history(
+        username,
         {
             "job_id": job_id,
             "created_at": iso_now(),
@@ -269,6 +530,7 @@ def models():
 
 @app.post("/api/jobs", status_code=202)
 def create_job(
+    username: str = Depends(require_user),
     song: UploadFile = File(...),
     image: UploadFile = File(None),
     images: list[UploadFile] = File(None),
@@ -330,6 +592,7 @@ def create_job(
     with jobs_lock:
         jobs[job_id] = {
             "id": job_id,
+            "username": username,
             "status": "queued",
             "message": "Job queued.",
             "error": None,
@@ -355,6 +618,7 @@ def create_job(
     thread = threading.Thread(
         target=run_job,
         args=(
+            username,
             job_id,
             audio_path,
             image_paths,
@@ -377,22 +641,26 @@ def create_job(
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str):
+def get_job(job_id: str, username: str = Depends(require_user)):
     with jobs_lock:
         job = jobs.get(job_id)
 
     if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("username") != username:
         raise HTTPException(status_code=404, detail="Job not found")
 
     return serialize_job(job)
 
 
 @app.get("/api/jobs/{job_id}/video")
-def download_video(job_id: str):
+def download_video(job_id: str, username: str = Depends(require_user)):
     with jobs_lock:
         job = jobs.get(job_id)
 
     if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("username") != username:
         raise HTTPException(status_code=404, detail="Job not found")
     if job["status"] != "complete" or not job["final_video"]:
         raise HTTPException(status_code=409, detail="Video is not ready")

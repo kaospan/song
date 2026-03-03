@@ -282,6 +282,271 @@ def write_json_file(path, payload):
         json.dump(payload, f, indent=2, sort_keys=True)
 
 
+def write_text_file(path, text):
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write((text or "").rstrip() + "\n")
+
+
+def format_mmss(seconds):
+    seconds = max(0, int(seconds))
+    mm, ss = divmod(seconds, 60)
+    return f"{mm:02d}:{ss:02d}"
+
+
+def build_segment_timestamp_map(segment_count, segment_length_seconds):
+    segment_length_seconds = max(1, int(segment_length_seconds))
+    mapping = []
+    for idx in range(segment_count):
+        start_s = idx * segment_length_seconds
+        end_s = min((idx + 1) * segment_length_seconds, segment_count * segment_length_seconds)
+        mapping.append(
+            {
+                "segment": idx + 1,
+                "start": format_mmss(start_s),
+                "end": format_mmss(end_s),
+                "timestamp": f"{format_mmss(start_s)}-{format_mmss(end_s)}",
+            }
+        )
+    return mapping
+
+
+def _tokenize_words(text):
+    if not text:
+        return []
+    # ASCII-ish tokenization is fine here; it's a heuristic for "theme" text.
+    words = re.findall(r"[A-Za-z']{3,}", text.lower())
+    stop = {
+        "the",
+        "and",
+        "but",
+        "for",
+        "with",
+        "that",
+        "this",
+        "your",
+        "you",
+        "i",
+        "im",
+        "i'm",
+        "ive",
+        "i've",
+        "dont",
+        "don't",
+        "when",
+        "then",
+        "into",
+        "from",
+        "back",
+        "just",
+        "like",
+        "feel",
+        "still",
+        "every",
+        "what",
+        "where",
+        "will",
+        "does",
+        "dont",
+        "know",
+        "over",
+        "under",
+    }
+    return [w for w in words if w not in stop]
+
+
+def infer_global_theme(lyrics_text, song_title=None):
+    words = _tokenize_words(lyrics_text or "")
+    if not words:
+        return (song_title or "Music video") + ": cohesive escalating narrative driven by the vocal tone."
+
+    counts = {}
+    for w in words:
+        counts[w] = counts.get(w, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    keywords = [w for w, _ in top]
+    title = (song_title or "").strip()
+    title_prefix = f"{title} — " if title else ""
+    # Keep it specific without over-claiming.
+    return (
+        f"{title_prefix}a psychologically tense, nocturnal descent where the lyrics' core motifs "
+        f"({', '.join(keywords[:6])}) manifest as subtle, escalating visual anomalies while the performance stays grounded."
+    )
+
+
+def classify_act(idx, segment_count):
+    if segment_count <= 0:
+        return "Intro"
+    t = (idx + 1) / segment_count
+    if t <= 0.15:
+        return "Act 1 — Intro"
+    if t <= 0.40:
+        return "Act 2 — Build"
+    if t <= 0.65:
+        return "Act 3 — Hook"
+    if t <= 0.85:
+        return "Act 4 — Climax"
+    return "Act 5 — Resolution"
+
+
+def build_scene_direction_prompt(idx, segment_count, timestamp, segment_lyrics, theme, intensity_bias="auto"):
+    act = classify_act(idx, segment_count)
+    segment_no = idx + 1
+
+    # Detect chorus/bridge markers from the mapped lyrics chunk (rough but useful).
+    lower = (segment_lyrics or "").lower()
+    is_chorus = "chorus" in lower
+    is_bridge = "bridge" in lower
+
+    progress = 0 if segment_count <= 1 else idx / (segment_count - 1)
+    base_level = 1 + int(progress * 4)  # 1..5
+    if is_chorus:
+        base_level = min(5, base_level + 1)
+    if is_bridge:
+        base_level = min(5, base_level + 1)
+
+    # Escalating anomalies (kept short; segment-specific).
+    anomaly_steps = [
+        "A faint pencil-sketch crosshatch briefly appears under the skin for 1–2 frames (5% opacity), then disappears.",
+        "Ink-like sketch veins trace along the jaw/neck in a thin, non-glowing line; subtle, intermittent, never pulsing.",
+        "City bokeh behind the subject momentarily collapses into a hand-drawn outline on beat accents, then returns to photoreal.",
+        "The subject's shadow lags reality by 1–2 frames during a lyric hit, then re-syncs; no horror jump, just uncanny.",
+        "Photoreal and sketch layers fully interlock: the sketch becomes a controlled overlay that breathes with the vocal dynamics, never text-like.",
+    ]
+    anomaly = anomaly_steps[max(0, min(4, base_level - 1))]
+
+    # Camera/lighting cues for this segment; still respects MASTER_PROMPT lock.
+    camera = (
+        "Maintain the continuous clockwise orbit; keep motion smooth and inevitable. "
+        "Micro-adjust orbit speed only to match the musical energy—no reversals, no shake."
+    )
+    lighting = (
+        "HDR cinematic lighting with moody blue/orange separation; dramatic shadow shape stays consistent. "
+        "Keep skin texture realistic; no stylization."
+    )
+    performance = (
+        "Precise, audio-driven lip sync; micro-expressions follow the lyric stress. "
+        "Blinking remains natural and sparse; avoid blinking on consonant attacks and sustained notes."
+    )
+
+    hook = (
+        "Hook rule: within the first 3 seconds, introduce one subtle anomaly (single beat), then let it dissolve."
+        if segment_no == 1
+        else "Within the first 3 seconds, introduce a subtle anomaly beat, then return to baseline."
+    )
+
+    return (
+        f"SEGMENT {segment_no:02d} ({timestamp}) — {act}\n"
+        f"Theme: {theme}\n"
+        f"{hook}\n"
+        f"Camera: {camera}\n"
+        f"Lighting/Look: {lighting}\n"
+        f"Performance: {performance}\n"
+        f"Escalation Level: {base_level}/5\n"
+        f"Anomaly: {anomaly}\n"
+        "Continuity: the first frame must feel like a seamless continuation from the prior segment; no reset.\n"
+        "Text/Artifacts: absolutely no on-screen text, subtitles, lyrics, captions, logos, or gibberish marks."
+    ).strip()
+
+
+def generate_segment_prompt_assets(
+    session_video_folder,
+    master_prompt_text,
+    lyrics_text,
+    lyrics_by_segment,
+    segment_length_seconds,
+    song_title=None,
+    song_artist=None,
+    video_style=None,
+):
+    """
+    Generate structured, per-segment prompts driven by lyrics, with a single locked MASTER_PROMPT.
+    Writes:
+      - creative/master_prompt.txt
+      - creative/lyrics.txt
+      - creative/timestamp_map.json
+      - creative/lyrics_by_segment.json
+      - creative/segments_prompts.json
+    """
+    segment_count = len(lyrics_by_segment)
+    creative_dir = os.path.join(session_video_folder, "creative")
+    os.makedirs(creative_dir, exist_ok=True)
+
+    master_prompt_path = os.path.join(creative_dir, "master_prompt.txt")
+    lyrics_path = os.path.join(creative_dir, "lyrics.txt")
+    timestamp_map_path = os.path.join(creative_dir, "timestamp_map.json")
+    lyrics_map_path = os.path.join(creative_dir, "lyrics_by_segment.json")
+    segments_prompts_path = os.path.join(creative_dir, "segments_prompts.json")
+
+    write_text_file(master_prompt_path, master_prompt_text)
+    if lyrics_text:
+        write_text_file(lyrics_path, lyrics_text)
+    else:
+        write_text_file(lyrics_path, "")
+
+    timestamp_map = build_segment_timestamp_map(segment_count, segment_length_seconds)
+    write_json_file(timestamp_map_path, timestamp_map)
+
+    lyrics_map = {
+        f"segment_{idx+1:02d}": (lyrics_by_segment[idx] or "")
+        for idx in range(segment_count)
+    }
+    write_json_file(lyrics_map_path, lyrics_map)
+
+    theme = infer_global_theme(lyrics_text, song_title=song_title)
+    segments = []
+    for idx in range(segment_count):
+        ts = timestamp_map[idx]["timestamp"]
+        segment_lyrics = lyrics_by_segment[idx] if idx < segment_count else ""
+        scene_direction = build_scene_direction_prompt(
+            idx,
+            segment_count,
+            ts,
+            segment_lyrics,
+            theme,
+        )
+
+        assembled_prompt = (
+            master_prompt_text.strip()
+            + f"\n\nSEGMENT: {idx:03d} ({ts})"
+            + (f"\n\nLYRICS (for this segment; do not render as text):\n{segment_lyrics}" if segment_lyrics else "")
+            + "\n\nSCENE DIRECTION:\n"
+            + scene_direction
+        )
+
+        segments.append(
+            {
+                "segmentNumber": idx + 1,
+                "timestamp": ts,
+                "lyricsLines": segment_lyrics or "",
+                "sceneDirectionPrompt": scene_direction,
+                "assembledPrompt": assembled_prompt,
+            }
+        )
+
+    payload = {
+        "video_style": video_style or "",
+        "song_title": song_title or "",
+        "song_artist": song_artist or "",
+        "segment_length_seconds": int(segment_length_seconds),
+        "segment_count": segment_count,
+        "global_theme": theme,
+        "segments": segments,
+    }
+    write_json_file(segments_prompts_path, payload)
+
+    return {
+        "creative_dir": os.path.abspath(creative_dir),
+        "master_prompt_path": os.path.abspath(master_prompt_path),
+        "lyrics_path": os.path.abspath(lyrics_path),
+        "timestamp_map_path": os.path.abspath(timestamp_map_path),
+        "lyrics_map_path": os.path.abspath(lyrics_map_path),
+        "segments_prompts_path": os.path.abspath(segments_prompts_path),
+    }
+
+
 def fetch_models():
     url = f"{API_BASE}/models"
     resp = http_session().get(url, headers=get_headers(), timeout=30)
@@ -1048,6 +1313,21 @@ def run_pipeline(
         max_lines_per_segment=max(1, int(lyrics_max_lines_per_segment)),
     )
 
+    # MASTER_PROMPT is the locked style template. Segment prompts are derived from lyrics and written
+    # to disk so a full run can be stitched without touching Hedra again.
+    master_prompt_text = (
+        validate_prompt_text(prompt_override) if prompt_override else load_prompt_text(prompt_file)
+    )
+    creative_assets = generate_segment_prompt_assets(
+        session_video_folder,
+        master_prompt_text,
+        lyrics_text,
+        lyrics_by_segment,
+        segment_length_seconds,
+        song_title=song_title,
+        song_artist=song_artist,
+    )
+
     if not resume_session and not session_label:
         latest_session_folder = get_latest_session_folder(output_video_root)
         if latest_session_folder and has_all_video_segments(latest_session_folder, segment_count):
@@ -1090,6 +1370,9 @@ def run_pipeline(
             "session_video_folder": os.path.abspath(session_video_folder),
             "videos_manifest": os.path.abspath(videos_manifest_path),
             "video_segments": [os.path.abspath(path) for path in expected_videos],
+            "reused_cached_audio": reused_cached_audio,
+            "reused_image_asset": False,
+            "creative_assets": creative_assets,
         }
 
     effective_model_name = (model_name or "").strip()
@@ -1098,9 +1381,7 @@ def run_pipeline(
             default_lipsync_model_name if lip_sync_required else default_non_lipsync_model_name
         )
 
-    prompt_text = (
-        validate_prompt_text(prompt_override) if prompt_override else load_prompt_text(prompt_file)
-    )
+    prompt_text = master_prompt_text
     models = fetch_models()
     try:
         model = resolve_model(

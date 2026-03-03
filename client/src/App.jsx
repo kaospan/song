@@ -5,6 +5,9 @@ import { buildPromptByName } from './promptBuilder'
 
 const ENV_API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 const STORAGE_API_BASE_KEY = 'mirrorMouthApiBaseUrl'
+const DEFAULT_DEV_API_BASE = 'http://127.0.0.1:8000'
+const DEFAULT_SEGMENT_SECONDS = 8
+const PROMPT_CHAR_SOFT_LIMIT = 2500
 
 function normalizeApiBase(value) {
   const trimmed = String(value ?? '').trim()
@@ -12,10 +15,107 @@ function normalizeApiBase(value) {
   return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed
 }
 
+function prettyLabel(value) {
+  return String(value ?? '')
+    .replaceAll('_', ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase())
+}
+
+function formatBytes(bytes) {
+  const size = Number(bytes || 0)
+  if (!Number.isFinite(size) || size <= 0) return '—'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let idx = 0
+  let value = size
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024
+    idx += 1
+  }
+  return `${value.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`
+}
+
+function formatDuration(seconds) {
+  const s = Number(seconds)
+  if (!Number.isFinite(s) || s <= 0) return '—'
+  const total = Math.round(s)
+  const mm = String(Math.floor(total / 60)).padStart(2, '0')
+  const ss = String(total % 60).padStart(2, '0')
+  return `${mm}:${ss}`
+}
+
+function DropZone({
+  label,
+  hint,
+  accept,
+  multiple,
+  valueLabel,
+  onFiles,
+  children,
+}) {
+  const [isDragging, setIsDragging] = useState(false)
+
+  function handleDrop(event) {
+    event.preventDefault()
+    setIsDragging(false)
+    const files = Array.from(event.dataTransfer?.files ?? [])
+    if (!files.length) return
+    onFiles(files)
+  }
+
+  return (
+    <div
+      className={`dropzone ${isDragging ? 'dragging' : ''}`}
+      onDragEnter={(event) => {
+        event.preventDefault()
+        setIsDragging(true)
+      }}
+      onDragOver={(event) => {
+        event.preventDefault()
+        setIsDragging(true)
+      }}
+      onDragLeave={(event) => {
+        event.preventDefault()
+        setIsDragging(false)
+      }}
+      onDrop={handleDrop}
+      role="group"
+      aria-label={label}
+    >
+      <div className="dropzone-header">
+        <div>
+          <div className="dropzone-label">{label}</div>
+          {hint ? <p className="dropzone-hint">{hint}</p> : null}
+        </div>
+        <label className="dropzone-button">
+          <input
+            accept={accept}
+            className="sr-only"
+            multiple={multiple}
+            type="file"
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? [])
+              onFiles(files)
+            }}
+          />
+          Choose file{multiple ? 's' : ''}
+        </label>
+      </div>
+
+      <div className="dropzone-body">
+        <div className="dropzone-value">{valueLabel}</div>
+        {children}
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState(() => {
     const stored = window.localStorage.getItem(STORAGE_API_BASE_KEY)
-    return normalizeApiBase(ENV_API_BASE || stored || '')
+    const fallback = import.meta.env.DEV ? DEFAULT_DEV_API_BASE : ''
+    return normalizeApiBase(ENV_API_BASE || stored || fallback)
   })
   const [songFile, setSongFile] = useState(null)
   const [imageFiles, setImageFiles] = useState([])
@@ -34,6 +134,8 @@ function App() {
   const [backendStatus, setBackendStatus] = useState('unknown') // unknown | ok | error
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [audioDurationSeconds, setAudioDurationSeconds] = useState(null)
 
   const apiBase = apiBaseUrl
   const apiUrl = (path) => `${apiBase}${path}`
@@ -53,10 +155,18 @@ function App() {
 
   useEffect(() => {
     let isMounted = true
+    const base = normalizeApiBase(apiBaseUrl)
 
     async function loadConfig() {
       try {
-        const response = await fetch(apiUrl('/api/config'))
+        if (!base) {
+          if (isMounted) {
+            setBackendStatus('unknown')
+          }
+          return
+        }
+
+        const response = await fetch(`${base}/api/config`)
         const payload = await response.json()
         if (!response.ok) {
           throw new Error(payload.detail || 'Unable to load backend config.')
@@ -81,11 +191,17 @@ function App() {
       }
     }
 
-    loadConfig()
-
     async function loadModels() {
       try {
-        const response = await fetch(apiUrl('/api/models'))
+        if (!base) {
+          if (isMounted) {
+            setAvailableModels([])
+            setBackendStatus('unknown')
+          }
+          return
+        }
+
+        const response = await fetch(`${base}/api/models`)
         const payload = await response.json()
         if (!response.ok) {
           throw new Error(payload.detail || 'Unable to load models.')
@@ -102,12 +218,14 @@ function App() {
       }
     }
 
+    setError('')
+    loadConfig()
     loadModels()
 
     return () => {
       isMounted = false
     }
-  }, [])
+  }, [apiBaseUrl])
 
   useEffect(() => {
     if (!defaultLipSyncModelName && !defaultNonLipSyncModelName) return
