@@ -1,44 +1,96 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
+const ENV_API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
+const STORAGE_API_BASE_KEY = 'mirrorMouthApiBaseUrl'
+
+function normalizeApiBase(value) {
+  const trimmed = String(value ?? '').trim()
+  if (!trimmed) return ''
+  return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed
+}
 
 function App() {
+  const [apiBaseUrl, setApiBaseUrl] = useState(() => {
+    const stored = window.localStorage.getItem(STORAGE_API_BASE_KEY)
+    return normalizeApiBase(ENV_API_BASE || stored || '')
+  })
   const [songFile, setSongFile] = useState(null)
-  const [imageFile, setImageFile] = useState(null)
+  const [imageFiles, setImageFiles] = useState([])
   const [songTitle, setSongTitle] = useState('')
   const [songArtist, setSongArtist] = useState('')
   const [job, setJob] = useState(null)
   const [defaultModelName, setDefaultModelName] = useState('')
+  const [availableModels, setAvailableModels] = useState([])
+  const [modelName, setModelName] = useState('')
+  const [modelTouched, setModelTouched] = useState(false)
+  const [videoStyles, setVideoStyles] = useState([])
+  const [videoStyle, setVideoStyle] = useState('cinematic_studio')
+  const [lipSyncRequired, setLipSyncRequired] = useState(true)
+  const [defaultLipSyncModelName, setDefaultLipSyncModelName] = useState('')
+  const [defaultNonLipSyncModelName, setDefaultNonLipSyncModelName] = useState('')
+  const [backendStatus, setBackendStatus] = useState('unknown') // unknown | ok | error
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const imagePreviewUrl = useMemo(() => {
-    if (!imageFile) return ''
-    return URL.createObjectURL(imageFile)
-  }, [imageFile])
+  const apiBase = apiBaseUrl
+  const apiUrl = (path) => `${apiBase}${path}`
+
+  const imagePreviewUrls = useMemo(() => {
+    if (!imageFiles?.length) return []
+    return imageFiles.map((file) => URL.createObjectURL(file))
+  }, [imageFiles])
 
   useEffect(() => {
     let isMounted = true
 
     async function loadConfig() {
       try {
-        const response = await fetch(`${API_BASE}/api/config`)
+        const response = await fetch(apiUrl('/api/config'))
         const payload = await response.json()
         if (!response.ok) {
           throw new Error(payload.detail || 'Unable to load backend config.')
         }
         if (isMounted) {
           setDefaultModelName(payload.default_model_name ?? '')
+          setModelName(payload.default_model_name ?? '')
+          setVideoStyles(payload.video_styles ?? [])
+          setVideoStyle(payload.default_video_style ?? 'cinematic_studio')
+          setLipSyncRequired(Boolean(payload.default_lip_sync_required ?? true))
+          setDefaultLipSyncModelName(payload.default_lipsync_model_name ?? '')
+          setDefaultNonLipSyncModelName(payload.default_non_lipsync_model_name ?? '')
+          setBackendStatus('ok')
         }
       } catch (configError) {
         if (isMounted) {
           setError(configError.message)
+          setBackendStatus('error')
         }
       }
     }
 
     loadConfig()
+
+    async function loadModels() {
+      try {
+        const response = await fetch(apiUrl('/api/models'))
+        const payload = await response.json()
+        if (!response.ok) {
+          throw new Error(payload.detail || 'Unable to load models.')
+        }
+        if (isMounted) {
+          setAvailableModels(payload.models ?? [])
+          setBackendStatus('ok')
+        }
+      } catch (modelError) {
+        if (isMounted) {
+          setError(modelError.message)
+          setBackendStatus('error')
+        }
+      }
+    }
+
+    loadModels()
 
     return () => {
       isMounted = false
@@ -46,12 +98,19 @@ function App() {
   }, [])
 
   useEffect(() => {
-    return () => {
-      if (imagePreviewUrl) {
-        URL.revokeObjectURL(imagePreviewUrl)
-      }
+    if (!defaultLipSyncModelName && !defaultNonLipSyncModelName) return
+
+    const recommended = lipSyncRequired ? defaultLipSyncModelName : defaultNonLipSyncModelName
+    if (!modelTouched && recommended) {
+      setModelName(recommended)
     }
-  }, [imagePreviewUrl])
+  }, [defaultLipSyncModelName, defaultNonLipSyncModelName, lipSyncRequired, modelTouched])
+
+  useEffect(() => {
+    return () => {
+      imagePreviewUrls.forEach((url) => URL.revokeObjectURL(url))
+    }
+  }, [imagePreviewUrls])
 
   useEffect(() => {
     if (!job || !['queued', 'processing'].includes(job.status)) {
@@ -60,7 +119,7 @@ function App() {
 
     const intervalId = window.setInterval(async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/jobs/${job.id}`)
+        const response = await fetch(apiUrl(`/api/jobs/${job.id}`))
         const nextJob = await response.json()
 
         if (!response.ok) {
@@ -76,11 +135,31 @@ function App() {
     return () => window.clearInterval(intervalId)
   }, [job])
 
+  async function testBackendConnection(nextBaseUrl) {
+    const base = normalizeApiBase(nextBaseUrl)
+    setBackendStatus('unknown')
+    setError('')
+
+    try {
+      const response = await fetch(`${base}/api/health`)
+      const payload = await response.json()
+      if (!response.ok || payload.status !== 'ok') {
+        throw new Error('Backend health check failed.')
+      }
+      setBackendStatus('ok')
+      return true
+    } catch (backendError) {
+      setBackendStatus('error')
+      setError(backendError.message)
+      return false
+    }
+  }
+
   async function handleSubmit(event) {
     event.preventDefault()
 
-    if (!songFile || !imageFile) {
-      setError('Choose both an audio file and a still image before starting.')
+    if (!songFile || !imageFiles.length) {
+      setError('Choose an audio file and at least one reference image before starting.')
       return
     }
 
@@ -90,11 +169,14 @@ function App() {
     try {
       const formData = new FormData()
       formData.append('song', songFile)
-      formData.append('image', imageFile)
+      imageFiles.forEach((file) => formData.append('images', file))
       formData.append('song_title', songTitle.trim())
       formData.append('song_artist', songArtist.trim())
+      formData.append('model_name', modelName || defaultModelName)
+      formData.append('video_style', videoStyle)
+      formData.append('lip_sync_required', lipSyncRequired ? '1' : '0')
 
-      const response = await fetch(`${API_BASE}/api/jobs`, {
+      const response = await fetch(apiUrl('/api/jobs'), {
         method: 'POST',
         body: formData,
       })
@@ -112,7 +194,20 @@ function App() {
     }
   }
 
-  const videoUrl = job?.status === 'complete' ? `${API_BASE}${job.download_url}` : ''
+  const videoUrl = job?.status === 'complete' ? `${apiBase}${job.download_url}` : ''
+  const modelOptions = useMemo(() => {
+    if (!availableModels?.length) return []
+    const filtered = availableModels.filter((model) =>
+      lipSyncRequired ? model.requires_audio_input : !model.requires_audio_input
+    )
+    return filtered.length ? filtered : availableModels
+  }, [availableModels, lipSyncRequired])
+
+  const mixedContentRisk = useMemo(() => {
+    if (typeof window === 'undefined') return false
+    if (!apiBase) return false
+    return window.location.protocol === 'https:' && apiBase.startsWith('http://')
+  }, [apiBase])
 
   return (
     <main className="app-shell">
@@ -132,6 +227,43 @@ function App() {
             <h2>Inputs</h2>
             <span className="chip">Model: {defaultModelName || 'Loading...'}</span>
           </div>
+
+          <label className="field-card">
+            <span className="field-label">Backend</span>
+            <div className="backend-row">
+              <input
+                placeholder="https://your-backend.example.com"
+                type="text"
+                value={apiBaseUrl}
+                onChange={(event) => setApiBaseUrl(normalizeApiBase(event.target.value))}
+              />
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={async () => {
+                  const next = normalizeApiBase(apiBaseUrl)
+                  window.localStorage.setItem(STORAGE_API_BASE_KEY, next)
+                  const ok = await testBackendConnection(next)
+                  if (ok) {
+                    window.location.reload()
+                  }
+                }}
+              >
+                Test
+              </button>
+            </div>
+            <p className="field-hint">
+              Leave blank for local dev proxy. On GitHub Pages you must use an HTTPS backend URL.
+            </p>
+            <div className={`backend-status ${backendStatus}`}>
+              {backendStatus === 'ok' ? 'Connected' : backendStatus === 'error' ? 'Not connected' : 'Not checked'}
+            </div>
+            {mixedContentRisk ? (
+              <p className="warning-text">
+                This page is HTTPS but your backend is HTTP. Browsers will block the requests. Use an HTTPS backend URL.
+              </p>
+            ) : null}
+          </label>
 
           <label className="field-card">
             <span className="field-label">Audio file</span>
@@ -177,24 +309,53 @@ function App() {
           </label>
 
           <label className="field-card">
+            <span className="field-label">Lip sync</span>
+            <div className="toggle-row">
+              <input
+                checked={lipSyncRequired}
+                id="lip-sync-required"
+                onChange={(event) => setLipSyncRequired(event.target.checked)}
+                type="checkbox"
+              />
+              <label htmlFor="lip-sync-required">
+                Require audio-driven lip sync (recommended)
+              </label>
+            </div>
+            <p className="field-hint">
+              When off, the backend picks a cheaper model and adds your audio in post.
+            </p>
+          </label>
+
+          <label className="field-card">
             <span className="field-label">Render model</span>
-            <select value={modelName} onChange={(event) => setModelName(event.target.value)}>
-              {(availableModels.length ? availableModels : [defaultModelName || 'Loading...']).map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
+            <select
+              value={modelName}
+              onChange={(event) => {
+                setModelName(event.target.value)
+                setModelTouched(true)
+              }}
+            >
+              {(modelOptions.length ? modelOptions.map((model) => model.name) : [defaultModelName || 'Loading...']).map(
+                (model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                )
+              )}
             </select>
           </label>
 
           <label className="field-card">
-            <span className="field-label">Reference image</span>
+            <span className="field-label">Reference images</span>
             <input
               accept="image/*,.png,.jpg,.jpeg,.webp"
+              multiple
               type="file"
-              onChange={(event) => setImageFile(event.target.files?.[0] ?? null)}
+              onChange={(event) => setImageFiles(Array.from(event.target.files ?? []))}
             />
-            <strong>{imageFile ? imageFile.name : 'No file selected'}</strong>
+            <strong>
+              {imageFiles.length ? `${imageFiles.length} image(s) selected` : 'No file selected'}
+            </strong>
           </label>
 
           <button className="launch-button" disabled={isSubmitting} type="submit">
@@ -240,12 +401,20 @@ function App() {
                 <dd>{job.model_name || modelName || defaultModelName}</dd>
               </div>
               <div>
+                <dt>Lip sync</dt>
+                <dd>{job.lip_sync_required ? 'required' : 'off'}</dd>
+              </div>
+              <div>
                 <dt>Audio</dt>
                 <dd>{job.audio_filename}</dd>
               </div>
               <div>
-                <dt>Image</dt>
-                <dd>{job.image_filename}</dd>
+                <dt>Images</dt>
+                <dd>
+                  {job.image_filenames?.length
+                    ? job.image_filenames.join(', ')
+                    : job.image_filename ?? '—'}
+                </dd>
               </div>
               <div>
                 <dt>Updated</dt>
@@ -254,9 +423,13 @@ function App() {
             </dl>
           ) : null}
 
-          {imagePreviewUrl ? (
+          {imagePreviewUrls.length ? (
             <div className="preview-card">
-              <img alt="Reference preview" src={imagePreviewUrl} />
+              <div className="preview-grid">
+                {imagePreviewUrls.slice(0, 4).map((url, index) => (
+                  <img alt={`Reference preview ${index + 1}`} key={url} src={url} />
+                ))}
+              </div>
             </div>
           ) : null}
         </aside>

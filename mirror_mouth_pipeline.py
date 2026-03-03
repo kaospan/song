@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from datetime import datetime
 
@@ -60,6 +61,10 @@ def hash_file(path, chunk_size=1024 * 1024):
     return hasher.hexdigest()
 
 
+def sha256_text(value):
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
+
+
 def prepend_tool_dir_to_path(*tool_paths):
     tool_dirs = []
     for tool_path in tool_paths:
@@ -89,6 +94,11 @@ if FFMPEG_PATH:
 
 INPUT_MP3 = normalize_env_path(os.environ.get("INPUT_MP3")) or "full_song.mp3"
 REFERENCE_IMAGE = normalize_env_path(os.environ.get("REFERENCE_IMAGE")) or "reference_image.png"
+REFERENCE_IMAGES = [
+    normalize_env_path(value)
+    for value in os.environ.get("REFERENCE_IMAGES", "").split(",")
+    if normalize_env_path(value)
+]
 SEGMENT_LENGTH_SECONDS = int(os.environ.get("SEGMENT_LENGTH_SECONDS", "8"))
 OUTPUT_AUDIO_FOLDER = normalize_env_path(os.environ.get("OUTPUT_AUDIO_FOLDER")) or "segments"
 OUTPUT_VIDEO_FOLDER = normalize_env_path(os.environ.get("OUTPUT_VIDEO_FOLDER")) or "video_segments"
@@ -98,6 +108,15 @@ FINAL_VIDEO_ARCHIVE_FOLDER = (
 )
 PROMPT_FILE = normalize_env_path(os.environ.get("PROMPT_FILE")) or "mirror_mouth_prompt.txt"
 HEDRA_MODEL_NAME = os.environ.get("HEDRA_MODEL_NAME", "Kling AI Avatar v2 Standard").strip()
+DEFAULT_LIPSYNC_MODEL_NAME = os.environ.get(
+    "DEFAULT_LIPSYNC_MODEL_NAME", "Kling AI Avatar v2 Standard"
+).strip()
+DEFAULT_NON_LIPSYNC_MODEL_NAME = os.environ.get("DEFAULT_NON_LIPSYNC_MODEL_NAME", "").strip()
+LIP_SYNC_REQUIRED = os.environ.get("LIP_SYNC_REQUIRED", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 SONG_TITLE = os.environ.get("SONG_TITLE")
 SONG_ARTIST = os.environ.get("SONG_ARTIST")
 IMAGE_ASSET_CACHE_PATH = (
@@ -106,6 +125,18 @@ IMAGE_ASSET_CACHE_PATH = (
 AUDIO_CACHE_ROOT = normalize_env_path(os.environ.get("AUDIO_CACHE_ROOT"))
 REUSE_IMAGE_ASSET = os.environ.get("REUSE_IMAGE_ASSET", "1").strip().lower() not in ("0", "false", "no")
 FORCE_IMAGE_UPLOAD = os.environ.get("FORCE_IMAGE_UPLOAD", "0").strip().lower() in ("1", "true", "yes")
+REUSE_AUDIO_ASSET = os.environ.get("REUSE_AUDIO_ASSET", "1").strip().lower() not in ("0", "false", "no")
+FORCE_AUDIO_UPLOAD = os.environ.get("FORCE_AUDIO_UPLOAD", "0").strip().lower() in ("1", "true", "yes")
+REUSE_COMPLETE_SESSIONS = os.environ.get("REUSE_COMPLETE_SESSIONS", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+REUSE_SEGMENTS_HARDLINK = os.environ.get("REUSE_SEGMENTS_HARDLINK", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
 REQUEST_DELAY_SECONDS = float(os.environ.get("REQUEST_DELAY_SECONDS", "60"))
 STATUS_POLL_INTERVAL_SECONDS = float(os.environ.get("STATUS_POLL_INTERVAL_SECONDS", "10"))
 QUEUED_STATUS_SLEEP_SECONDS = float(os.environ.get("QUEUED_STATUS_SLEEP_SECONDS", "120"))
@@ -121,6 +152,15 @@ SESSION_LABEL = os.environ.get("SESSION_LABEL")
 
 API_BASE = "https://api.hedra.com/web-app/public"
 API_KEY = os.environ.get("API_KEY")
+_thread_local = threading.local()
+
+
+def http_session():
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        _thread_local.session = session
+    return session
 
 
 def get_headers(content_type=None):
@@ -180,18 +220,64 @@ def write_json_file(path, payload):
         json.dump(payload, f, indent=2, sort_keys=True)
 
 
-def resolve_model(model_name):
+def fetch_models():
     url = f"{API_BASE}/models"
-    resp = requests.get(url, headers=get_headers(), timeout=30)
+    resp = http_session().get(url, headers=get_headers(), timeout=30)
     if not resp.ok:
         raise_with_body(resp)
+    return resp.json()
 
-    models = resp.json()
+
+def pick_fallback_model(models, require_audio_input):
+    normalized = [
+        {**model, "_name": str(model.get("name", "")).strip().lower()}
+        for model in models
+        if model.get("type") == "video"
+    ]
+
+    if require_audio_input:
+        preferred = [
+            "kling ai avatar v2 standard",
+            "kling ai avatar v2 pro",
+            "hedra avatar",
+        ]
+        for pref in preferred:
+            for model in normalized:
+                if model.get("requires_audio_input") and model["_name"] == pref:
+                    return model
+        for model in normalized:
+            if model.get("requires_audio_input") and "avatar" in model["_name"]:
+                return model
+        for model in normalized:
+            if model.get("requires_audio_input"):
+                return model
+        return None
+
+    preferred = [
+        "kling 1.6 i2v",
+        "kling o3 standard i2v",
+        "kling v3 standard i2v",
+    ]
+    for pref in preferred:
+        for model in normalized:
+            if not model.get("requires_audio_input") and model["_name"] == pref:
+                return model
+    for model in normalized:
+        if not model.get("requires_audio_input") and "kling" in model["_name"] and "i2v" in model["_name"]:
+            return model
+    for model in normalized:
+        if not model.get("requires_audio_input"):
+            return model
+    return None
+
+
+def resolve_model(model_name, require_audio_input=True, models=None):
+    models = models or fetch_models()
     normalized_name = model_name.strip().lower()
 
     for model in models:
         if str(model.get("name", "")).strip().lower() == normalized_name:
-            if not model.get("requires_audio_input"):
+            if require_audio_input and not model.get("requires_audio_input"):
                 audio_model_names = sorted(
                     m.get("name", "<unnamed>")
                     for m in models
@@ -214,7 +300,7 @@ def create_asset_record(name, type_="image"):
     payload = {"name": name, "type": type_}
     headers = get_headers("application/json")
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    resp = http_session().post(url, headers=headers, json=payload, timeout=30)
     if not resp.ok:
         raise_with_body(resp)
 
@@ -226,7 +312,7 @@ def upload_file_to_asset(asset_id, path, mime="application/octet-stream"):
 
     with open(path, "rb") as f:
         files = {"file": (os.path.basename(path), f, mime)}
-        resp = requests.post(url, headers=get_headers(), files=files, timeout=120)
+        resp = http_session().post(url, headers=get_headers(), files=files, timeout=120)
 
     if not resp.ok:
         raise_with_body(resp)
@@ -256,7 +342,7 @@ def upload_asset(path, name=None, mime=None, type_="image"):
     if upload_url:
         print(f"Uploading to presigned URL for asset {asset_id}")
         with open(path, "rb") as f:
-            put_resp = requests.put(upload_url, data=f, timeout=120)
+            put_resp = http_session().put(upload_url, data=f, timeout=120)
         if not put_resp.ok:
             raise_with_body(put_resp)
     else:
@@ -306,6 +392,60 @@ def get_latest_session_folder(output_video_root):
 
     latest = max(session_dirs, key=lambda d: d.stat().st_mtime)
     return latest.path
+
+
+def read_run_manifest(session_folder):
+    return load_json_file(os.path.join(session_folder, "run_manifest.json")) or {}
+
+
+def write_run_manifest(session_folder, manifest):
+    write_json_file(os.path.join(session_folder, "run_manifest.json"), manifest)
+
+
+def list_session_folders(output_video_root):
+    if not os.path.isdir(output_video_root):
+        return []
+    entries = [entry for entry in os.scandir(output_video_root) if entry.is_dir()]
+    entries.sort(key=lambda entry: entry.stat().st_mtime, reverse=True)
+    return [entry.path for entry in entries]
+
+
+def link_or_copy(src, dst, prefer_hardlink=True):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.exists(dst) and os.path.getsize(dst) > 0:
+        return
+    if prefer_hardlink:
+        try:
+            os.link(src, dst)
+            return
+        except OSError:
+            pass
+    shutil.copy2(src, dst)
+
+
+def reuse_complete_session_segments(output_video_root, session_video_folder, fingerprint, segment_count):
+    if not REUSE_COMPLETE_SESSIONS:
+        return False
+
+    for candidate in list_session_folders(output_video_root):
+        if os.path.normpath(candidate) == os.path.normpath(session_video_folder):
+            continue
+        candidate_manifest = read_run_manifest(candidate)
+        if not candidate_manifest:
+            continue
+        if candidate_manifest.get("fingerprint") != fingerprint:
+            continue
+        if not has_all_video_segments(candidate, segment_count):
+            continue
+
+        print("Reusing completed segments from:", candidate)
+        for idx in range(segment_count):
+            src = os.path.join(candidate, f"video_{idx:03}.mp4")
+            dst = os.path.join(session_video_folder, f"video_{idx:03}.mp4")
+            link_or_copy(src, dst, prefer_hardlink=REUSE_SEGMENTS_HARDLINK)
+        return True
+
+    return False
 
 
 def build_timestamped_final_video_name(final_video_name):
@@ -368,6 +508,17 @@ def save_versioned_video_copy(final_video_path, input_mp3, archive_folder, song_
     versioned_path = os.path.join(archive_folder, versioned_filename)
     shutil.copy2(final_video_path, versioned_path)
     return versioned_path
+
+
+def archive_run_inputs(run_folder, input_mp3, reference_images):
+    inputs_dir = os.path.join(run_folder, "inputs")
+    os.makedirs(inputs_dir, exist_ok=True)
+
+    shutil.copy2(input_mp3, os.path.join(inputs_dir, os.path.basename(input_mp3)))
+    images_dir = os.path.join(inputs_dir, "reference_images")
+    os.makedirs(images_dir, exist_ok=True)
+    for path in reference_images:
+        shutil.copy2(path, os.path.join(images_dir, os.path.basename(path)))
 
 
 def load_cached_audio_segments(output_audio_folder, input_mp3_hash, segment_length_seconds):
@@ -459,9 +610,11 @@ def has_all_video_segments(session_video_folder, segment_count):
 def load_asset_cache(cache_path):
     cache = load_json_file(cache_path)
     if not cache:
-        return {"images": {}}
+        return {"images": {}, "audio": {}}
     if "images" not in cache or not isinstance(cache["images"], dict):
         cache["images"] = {}
+    if "audio" not in cache or not isinstance(cache["audio"], dict):
+        cache["audio"] = {}
     return cache
 
 
@@ -477,14 +630,18 @@ def save_segment_jobs(session_video_folder, segment_jobs):
     write_json_file(os.path.join(session_video_folder, "segment_jobs.json"), segment_jobs)
 
 
-def stitch_video(video_files, manifest_path, final_video_name):
+def stitch_video(video_files, manifest_path, final_video_name, audio_track_path=None):
     ffmpeg_bin = FFMPEG_PATH or "ffmpeg"
 
     with open(manifest_path, "w", encoding="utf-8") as f:
         for video_file in video_files:
             f.write(f"file '{os.path.abspath(video_file)}'\n")
 
-    ffmpeg_cmd = [
+    def _run(cmd, label):
+        print(label)
+        subprocess.run(cmd, check=True)
+
+    concat_input = [
         ffmpeg_bin,
         "-f",
         "concat",
@@ -492,21 +649,77 @@ def stitch_video(video_files, manifest_path, final_video_name):
         "0",
         "-i",
         manifest_path,
-        "-c:v",
-        "libx264",
-        "-crf",
-        "23",
-        "-preset",
-        "medium",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        final_video_name,
     ]
 
-    print("Running ffmpeg...")
-    subprocess.run(ffmpeg_cmd, check=True)
+    if audio_track_path:
+        fast_cmd = concat_input + [
+            "-i",
+            audio_track_path,
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-shortest",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            final_video_name,
+        ]
+        slow_cmd = concat_input + [
+            "-i",
+            audio_track_path,
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "23",
+            "-preset",
+            "medium",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            final_video_name,
+        ]
+    else:
+        fast_cmd = concat_input + [
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            final_video_name,
+        ]
+        slow_cmd = concat_input + [
+            "-c:v",
+            "libx264",
+            "-crf",
+            "23",
+            "-preset",
+            "medium",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            final_video_name,
+        ]
+
+    try:
+        _run(fast_cmd, "Running ffmpeg (fast concat)...")
+    except subprocess.CalledProcessError:
+        _run(slow_cmd, "Fast concat failed; re-encoding...")
 
 
 def extract_last_frame(video_path, frame_path):
@@ -551,7 +764,7 @@ def poll_generation_status(status_url):
 
     while True:
         try:
-            status_resp = requests.get(
+            status_resp = http_session().get(
                 status_url,
                 headers=get_headers(),
                 timeout=STATUS_TIMEOUT_SECONDS,
@@ -601,7 +814,7 @@ def download_video_file(video_url, video_path):
 
     for attempt in range(1, DOWNLOAD_RETRY_LIMIT + 1):
         try:
-            with requests.get(
+            with http_session().get(
                 video_url,
                 headers=download_headers,
                 stream=True,
@@ -643,6 +856,7 @@ def download_video_file(video_url, video_path):
 def run_pipeline(
     input_mp3=INPUT_MP3,
     reference_image=REFERENCE_IMAGE,
+    reference_images=None,
     segment_length_seconds=SEGMENT_LENGTH_SECONDS,
     output_audio_folder=OUTPUT_AUDIO_FOLDER,
     output_video_root=OUTPUT_VIDEO_FOLDER,
@@ -659,15 +873,40 @@ def run_pipeline(
     image_asset_cache_path=IMAGE_ASSET_CACHE_PATH,
     reuse_image_asset=REUSE_IMAGE_ASSET,
     force_image_upload=FORCE_IMAGE_UPLOAD,
+    reuse_audio_asset=REUSE_AUDIO_ASSET,
+    force_audio_upload=FORCE_AUDIO_UPLOAD,
+    prompt_override=None,
+    lip_sync_required=LIP_SYNC_REQUIRED,
+    default_lipsync_model_name=DEFAULT_LIPSYNC_MODEL_NAME,
+    default_non_lipsync_model_name=DEFAULT_NON_LIPSYNC_MODEL_NAME,
 ):
     if not os.path.exists(input_mp3):
         raise FileNotFoundError(f"Input MP3 not found: {input_mp3}")
-    if not os.path.exists(reference_image):
-        raise FileNotFoundError(f"Reference image not found: {reference_image}")
+    if reference_images is None:
+        reference_images = REFERENCE_IMAGES or ([reference_image] if reference_image else [])
+    reference_images = [path for path in reference_images if path]
+    if not reference_images:
+        raise ValueError("No reference images provided.")
+    missing = [path for path in reference_images if not os.path.exists(path)]
+    if missing:
+        raise FileNotFoundError(f"Reference image(s) not found: {', '.join(missing)}")
 
     input_mp3_hash = hash_file(input_mp3)
+    output_stem = build_output_stem(
+        song_title,
+        song_artist,
+        os.path.splitext(os.path.basename(input_mp3))[0],
+    )
     if audio_cache_root:
-        output_audio_folder = os.path.join(audio_cache_root, input_mp3_hash)
+        output_audio_folder = os.path.join(audio_cache_root, output_stem, input_mp3_hash)
+    else:
+        output_audio_folder = os.path.join(output_audio_folder, output_stem, input_mp3_hash)
+
+    # Keep local runs organized by title. API server passes per-job output roots and won't hit this.
+    if output_video_root == OUTPUT_VIDEO_FOLDER:
+        output_video_root = os.path.join(output_video_root, output_stem)
+    if final_video_archive_folder == FINAL_VIDEO_ARCHIVE_FOLDER:
+        final_video_archive_folder = os.path.join(final_video_archive_folder, output_stem)
 
     session_video_folder = build_session_video_folder(
         output_video_root,
@@ -676,6 +915,12 @@ def run_pipeline(
     )
     final_video_name = build_named_final_video_path(final_video_name, song_title, song_artist)
     final_video_name = build_timestamped_final_video_name(final_video_name)
+    final_video_dir = os.path.dirname(final_video_name)
+    if not final_video_dir and final_video_archive_folder:
+        run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+        final_video_dir = os.path.join(final_video_archive_folder, "runs", run_stamp)
+        os.makedirs(final_video_dir, exist_ok=True)
+        final_video_name = os.path.join(final_video_dir, os.path.basename(final_video_name))
     videos_manifest_path = os.path.join(session_video_folder, "videos.txt")
 
     if resume_session:
@@ -699,12 +944,6 @@ def run_pipeline(
         )
     segment_count = len(audio_files)
 
-    prompt_text = validate_prompt_text(prompt_override) if prompt_override else load_prompt_text(prompt_file)
-    model = resolve_model(model_name)
-    model_id = model["id"]
-    print("Using prompt file:", prompt_file)
-    print("Using model:", model_name, model_id)
-
     if not resume_session and not session_label:
         latest_session_folder = get_latest_session_folder(output_video_root)
         if latest_session_folder and has_all_video_segments(latest_session_folder, segment_count):
@@ -719,8 +958,18 @@ def run_pipeline(
             "All segments already exist in this session. "
             "Skipping Hedra and stitching immediately."
         )
+        existing_manifest = read_run_manifest(session_video_folder)
+        existing_fingerprint = existing_manifest.get("fingerprint", {}) if existing_manifest else {}
+        existing_lip_sync = bool(existing_fingerprint.get("lip_sync_required", True))
         expected_videos = get_expected_video_paths(session_video_folder, segment_count)
-        stitch_video(expected_videos, videos_manifest_path, final_video_name)
+        stitch_video(
+            expected_videos,
+            videos_manifest_path,
+            final_video_name,
+            audio_track_path=input_mp3 if not existing_lip_sync else None,
+        )
+        if final_video_dir:
+            archive_run_inputs(final_video_dir, input_mp3, reference_images)
         versioned_copy_path = save_versioned_video_copy(
             final_video_name,
             input_mp3,
@@ -738,38 +987,136 @@ def run_pipeline(
             "video_segments": [os.path.abspath(path) for path in expected_videos],
         }
 
-    image_asset_id = None
-    image_hash = None
-    if reuse_image_asset and image_asset_cache_path and not force_image_upload:
-        image_hash = hash_file(reference_image)
-        cache = load_asset_cache(image_asset_cache_path)
-        cached_entry = cache.get("images", {}).get(image_hash)
-        if cached_entry and cached_entry.get("asset_id"):
-            image_asset_id = cached_entry["asset_id"]
-            print("Reusing cached image asset id:", image_asset_id)
-
-    if not image_asset_id:
-        print("Uploading reference image...")
-        image_asset_id = upload_asset(
-            reference_image,
-            name=os.path.basename(reference_image),
-            mime="image/png",
-            type_="image",
+    effective_model_name = (model_name or "").strip()
+    if not effective_model_name:
+        effective_model_name = (
+            default_lipsync_model_name if lip_sync_required else default_non_lipsync_model_name
         )
-        print("Reference image asset id:", image_asset_id)
-        if reuse_image_asset and image_asset_cache_path and not force_image_upload:
-            if image_hash is None:
-                image_hash = hash_file(reference_image)
-            cache = load_asset_cache(image_asset_cache_path)
-            cache["images"][image_hash] = {
-                "asset_id": image_asset_id,
-                "filename": os.path.basename(reference_image),
-                "updated_at": datetime.now().isoformat(),
+
+    prompt_text = (
+        validate_prompt_text(prompt_override) if prompt_override else load_prompt_text(prompt_file)
+    )
+    models = fetch_models()
+    try:
+        model = resolve_model(
+            effective_model_name,
+            require_audio_input=lip_sync_required,
+            models=models,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if "not found. Available models:" not in message:
+            raise
+        fallback = pick_fallback_model(models, require_audio_input=lip_sync_required)
+        if not fallback:
+            raise
+        print("Requested model not found:", effective_model_name)
+        print("Falling back to model:", fallback.get("name"))
+        effective_model_name = str(fallback.get("name", effective_model_name))
+        model = fallback
+    model_id = model["id"]
+    model_requires_audio = bool(model.get("requires_audio_input"))
+    print("Using prompt file:", prompt_file)
+    print("Using model:", effective_model_name, model_id)
+    print("Lip sync required:", bool(lip_sync_required))
+
+    reference_image_hashes = [hash_file(path) for path in reference_images]
+    reference_image_hashes_sorted = sorted(reference_image_hashes)
+    fingerprint = {
+        "input_mp3_hash": input_mp3_hash,
+        "reference_image_hashes": reference_image_hashes_sorted,
+        "prompt_hash": sha256_text(prompt_text),
+        "segment_length_seconds": segment_length_seconds,
+        "segment_count": segment_count,
+        "model_id": model_id,
+        "model_name": effective_model_name,
+        "lip_sync_required": bool(lip_sync_required),
+        "generated_video_inputs": {
+            "aspect_ratio": "9:16",
+            "resolution": "720p",
+            "enhance_prompt": False,
+        },
+    }
+    write_run_manifest(
+        session_video_folder,
+        {
+            "created_at": datetime.now().isoformat(),
+            "fingerprint": fingerprint,
+        },
+    )
+
+    if not resume_session:
+        reused_segments = reuse_complete_session_segments(
+            output_video_root,
+            session_video_folder,
+            fingerprint,
+            segment_count,
+        )
+        if reused_segments and has_all_video_segments(session_video_folder, segment_count):
+            print("Segments reused. Stitching without contacting Hedra...")
+            expected_videos = get_expected_video_paths(session_video_folder, segment_count)
+            stitch_video(
+                expected_videos,
+                videos_manifest_path,
+                final_video_name,
+                audio_track_path=input_mp3 if not model_requires_audio else None,
+            )
+            if final_video_dir:
+                archive_run_inputs(final_video_dir, input_mp3, reference_images)
+            versioned_copy_path = save_versioned_video_copy(
+                final_video_name,
+                input_mp3,
+                final_video_archive_folder,
+                song_title=song_title,
+                song_artist=song_artist,
+            )
+            print("\nDONE. Final video created:", final_video_name)
+            print("Versioned archive copy:", versioned_copy_path)
+            return {
+                "final_video": os.path.abspath(final_video_name),
+                "versioned_final_video": os.path.abspath(versioned_copy_path),
+                "session_video_folder": os.path.abspath(session_video_folder),
+                "videos_manifest": os.path.abspath(videos_manifest_path),
+                "video_segments": [os.path.abspath(path) for path in expected_videos],
+                "reused_cached_audio": reused_cached_audio,
+                "reused_image_asset": False,
             }
-            save_asset_cache(image_asset_cache_path, cache)
+
+    asset_cache = load_asset_cache(image_asset_cache_path) if image_asset_cache_path else None
+    asset_cache_dirty = False
+
+    image_asset_ids = []
+    reused_image_asset = False
+    for idx, (image_path, image_hash) in enumerate(zip(reference_images, reference_image_hashes)):
+        image_asset_id = None
+        if reuse_image_asset and asset_cache and not force_image_upload:
+            cached_entry = asset_cache.get("images", {}).get(image_hash)
+            if cached_entry and cached_entry.get("asset_id"):
+                image_asset_id = cached_entry["asset_id"]
+                reused_image_asset = True
+                print("Reusing cached image asset id:", image_asset_id)
+
+        if not image_asset_id:
+            print("Uploading reference image:", os.path.basename(image_path))
+            image_asset_id = upload_asset(
+                image_path,
+                name=os.path.basename(image_path),
+                mime="image/png",
+                type_="image",
+            )
+            print("Reference image asset id:", image_asset_id)
+            if reuse_image_asset and asset_cache and not force_image_upload:
+                asset_cache["images"][image_hash] = {
+                    "asset_id": image_asset_id,
+                    "filename": os.path.basename(image_path),
+                    "updated_at": datetime.now().isoformat(),
+                }
+                asset_cache_dirty = True
+
+        image_asset_ids.append(image_asset_id)
 
     video_files = []
-    current_start_keyframe_id = image_asset_id
+    current_start_keyframe_id = image_asset_ids[0]
     segment_jobs = load_segment_jobs(session_video_folder)
 
     for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
@@ -828,19 +1175,41 @@ def run_pipeline(
                 segment_jobs.pop(segment_key, None)
                 save_segment_jobs(session_video_folder, segment_jobs)
 
-        print("Uploading audio segment:", audio_file)
-        audio_asset_id = upload_asset(
-            audio_file,
-            name=os.path.basename(audio_file),
-            mime="audio/mpeg",
-            type_="audio",
-        )
-        print("Audio asset id:", audio_asset_id)
+        audio_asset_id = None
+        audio_hash = None
+        reused_audio_asset = False
+        if model_requires_audio:
+            if reuse_audio_asset and asset_cache and not force_audio_upload:
+                audio_hash = hash_file(audio_file)
+                cached_audio = asset_cache.get("audio", {}).get(audio_hash)
+                if cached_audio and cached_audio.get("asset_id"):
+                    audio_asset_id = cached_audio["asset_id"]
+                    reused_audio_asset = True
+                    print("Reusing cached audio asset id:", audio_asset_id)
+
+            if not audio_asset_id:
+                print("Uploading audio segment:", audio_file)
+                audio_asset_id = upload_asset(
+                    audio_file,
+                    name=os.path.basename(audio_file),
+                    mime="audio/mpeg",
+                    type_="audio",
+                )
+                print("Audio asset id:", audio_asset_id)
+                if reuse_audio_asset and asset_cache and not force_audio_upload:
+                    if audio_hash is None:
+                        audio_hash = hash_file(audio_file)
+                    asset_cache["audio"][audio_hash] = {
+                        "asset_id": audio_asset_id,
+                        "filename": os.path.basename(audio_file),
+                        "updated_at": datetime.now().isoformat(),
+                    }
+                    asset_cache_dirty = True
+        else:
+            print("Model does not require audio; skipping audio upload.")
 
         generation_payload = {
             "type": "video",
-            "start_keyframe_id": current_start_keyframe_id,
-            "audio_id": audio_asset_id,
             "ai_model_id": model_id,
             "generated_video_inputs": {
                 "text_prompt": prompt_text,
@@ -850,15 +1219,39 @@ def run_pipeline(
                 "enhance_prompt": False,
             },
         }
+        include_reference_images = (idx == 0 and len(image_asset_ids) > 1)
+        if include_reference_images:
+            generation_payload["reference_image_ids"] = image_asset_ids
+        else:
+            generation_payload["start_keyframe_id"] = current_start_keyframe_id
+        if audio_asset_id:
+            generation_payload["audio_id"] = audio_asset_id
 
         print("Starting generation...")
         gen_url = f"{API_BASE}/generations"
-        resp = requests.post(
+        resp = http_session().post(
             gen_url,
             headers=get_headers("application/json"),
             json=generation_payload,
             timeout=60,
         )
+
+        if include_reference_images and resp.status_code == 422:
+            try:
+                body = resp.json()
+                messages = " ".join(body.get("messages", []))
+            except Exception:
+                messages = resp.text
+            if "reference_image_ids" in messages and ("start/end keyframe" in messages or "start keyframe" in messages):
+                print("Multiple reference images rejected with keyframe rules; retrying without reference_image_ids.")
+                generation_payload.pop("reference_image_ids", None)
+                generation_payload["start_keyframe_id"] = current_start_keyframe_id
+                resp = http_session().post(
+                    gen_url,
+                    headers=get_headers("application/json"),
+                    json=generation_payload,
+                    timeout=60,
+                )
 
         if not resp.ok:
             if resp.status_code == 402:
@@ -883,8 +1276,10 @@ def run_pipeline(
         segment_jobs[segment_key] = {
             "job_id": job_id,
             "audio_file": os.path.abspath(audio_file),
+            "audio_asset_id": audio_asset_id,
             "duration_ms": audio_duration_ms,
             "model_id": model_id,
+            "requires_audio_input": model_requires_audio,
             "created_at": datetime.now().isoformat(),
             "status": "submitted",
         }
@@ -925,6 +1320,9 @@ def run_pipeline(
             print(f"Waiting {request_delay_seconds} seconds (rate limit buffer)...")
             time.sleep(request_delay_seconds)
 
+    if asset_cache_dirty and image_asset_cache_path and asset_cache:
+        save_asset_cache(image_asset_cache_path, asset_cache)
+
     if not video_files:
         raise RuntimeError("No video segments were generated. Check credits and API errors.")
 
@@ -935,7 +1333,14 @@ def run_pipeline(
     else:
         print("\nStitching final video...")
 
-    stitch_video(video_files, videos_manifest_path, final_video_name)
+    stitch_video(
+        video_files,
+        videos_manifest_path,
+        final_video_name,
+        audio_track_path=input_mp3 if not model_requires_audio else None,
+    )
+    if final_video_dir:
+        archive_run_inputs(final_video_dir, input_mp3, reference_images)
     versioned_copy_path = save_versioned_video_copy(
         final_video_name,
         input_mp3,

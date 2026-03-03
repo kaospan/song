@@ -132,6 +132,74 @@
   color: #f8fafc;
 }
 
+.field-card select {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(2, 6, 23, 0.72);
+  color: #f8fafc;
+}
+
+.backend-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.secondary-button {
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(125, 211, 252, 0.12);
+  color: #e0f2fe;
+  letter-spacing: 0.02em;
+}
+
+.backend-status {
+  margin-top: 10px;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(235, 241, 255, 0.65);
+}
+
+.backend-status.ok {
+  color: #bbf7d0;
+}
+
+.backend-status.error {
+  color: #fecaca;
+}
+
+.warning-text {
+  margin: 10px 0 0;
+  color: #fde68a;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toggle-row input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+}
+
+.toggle-row label {
+  color: rgba(235, 241, 255, 0.86);
+}
+
+.field-hint {
+  margin: 0;
+  color: rgba(235, 241, 255, 0.6);
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
 .launch-button {
   width: 100%;
   margin-top: 8px;
@@ -187,6 +255,18 @@
   display: block;
   width: 100%;
   height: 320px;
+  object-fit: cover;
+}
+
+.preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.preview-grid img {
+  display: block;
+  width: 100%;
+  height: 160px;
   object-fit: cover;
 }
 
