@@ -206,6 +206,7 @@ node_modules/
 
 # Local media (keep on disk, never commit)
 local_media/
+songs/
 *.mp3
 *.mp4
 *.wav

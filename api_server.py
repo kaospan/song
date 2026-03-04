@@ -31,6 +31,7 @@ from mirror_mouth_pipeline import (
 BASE_DIR = Path(__file__).resolve().parent
 JOB_ROOT = BASE_DIR / "job_runs"
 JOB_ROOT.mkdir(exist_ok=True)
+SONGS_DIR = (BASE_DIR / (os.environ.get("SONGS_DIR", "songs"))).resolve()
 USERS_DB_PATH = JOB_ROOT / "users.json"
 USERS_DIR = JOB_ROOT / "users"
 USERS_DIR.mkdir(exist_ok=True)
@@ -418,6 +419,26 @@ def save_upload(upload, destination):
         shutil.copyfileobj(upload.file, buffer)
 
 
+def resolve_song_library_path(song_id: str) -> Path:
+    """
+    Resolves a backend-library song id (filename) to an on-disk path under SONGS_DIR.
+    Prevents path traversal by accepting only bare filenames.
+    """
+    value = (song_id or "").strip()
+    if not value:
+        raise HTTPException(status_code=422, detail="song_id is empty.")
+    if "/" in value or "\\" in value or value.startswith("."):
+        raise HTTPException(status_code=422, detail="song_id must be a filename (no paths).")
+    candidate = (SONGS_DIR / value).resolve()
+    if SONGS_DIR not in candidate.parents and candidate != SONGS_DIR:
+        raise HTTPException(status_code=422, detail="Invalid song_id path.")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Song not found in library.")
+    if candidate.suffix.lower() not in (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"):
+        raise HTTPException(status_code=422, detail="Unsupported song file type.")
+    return candidate
+
+
 def load_prompt_history():
     if not PROMPT_HISTORY_PATH.exists():
         return []
@@ -638,10 +659,35 @@ def models():
     return {"models": fetch_models_metadata()}
 
 
+@app.get("/api/library/songs")
+def list_song_library(username: str = Depends(require_user)):
+    # Username currently unused; keep it for future per-user libraries and to enforce auth when enabled.
+    if not SONGS_DIR.exists():
+        return {"songs": []}
+
+    songs = []
+    for path in sorted(SONGS_DIR.glob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"):
+            continue
+        stat = path.stat()
+        songs.append(
+            {
+                "id": path.name,
+                "filename": path.name,
+                "bytes": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+    return {"songs": songs}
+
+
 @app.post("/api/jobs", status_code=202)
 def create_job(
     username: str = Depends(require_user),
-    song: UploadFile = File(...),
+    song: UploadFile = File(None),
+    song_id: str = Form(""),
     image: UploadFile = File(None),
     images: list[UploadFile] = File(None),
     lyrics: UploadFile = File(None),
@@ -655,6 +701,9 @@ def create_job(
     segment_name: str = Form(""),
     prompt_override: str = Form(""),
 ):
+    if song is None and not str(song_id or "").strip():
+        raise HTTPException(status_code=422, detail="Provide either an uploaded song file or song_id.")
+
     lip_sync = str(lip_sync_required).strip().lower() in ("1", "true", "yes", "on")
     resolved_model_name = (model_name or "").strip()
     if not resolved_model_name:
@@ -670,10 +719,17 @@ def create_job(
     uploads_dir = job_dir / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
 
-    audio_name = Path(song.filename or "song.mp3").name
-    audio_path = uploads_dir / audio_name
-
-    save_upload(song, audio_path)
+    audio_path = None
+    audio_name = None
+    if song is not None:
+        audio_name = Path(song.filename or "song.mp3").name
+        audio_path = uploads_dir / audio_name
+        save_upload(song, audio_path)
+    else:
+        resolved = resolve_song_library_path(song_id)
+        audio_name = resolved.name
+        audio_path = uploads_dir / audio_name
+        shutil.copy2(resolved, audio_path)
 
     image_uploads = []
     if images:
