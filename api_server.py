@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import threading
 import traceback
 import uuid
@@ -131,6 +132,28 @@ VIDEO_STYLE_PRESETS = {
     },
 }
 
+VIDEO_CLEANUP_PRESETS = {
+    "homemade_shock": {
+        "label": "Homemade Shock",
+        "description": "Reduce AI artifacts, keep a raw homemade feel, and deepen the dark, unsettling tone.",
+        "filter": (
+            "hqdn3d=1.2:1.2:6:6,"
+            "deflicker=size=5:mode=pm,"
+            "deband,"
+            "eq=contrast=1.06:brightness=-0.02:saturation=0.96,"
+            "vignette=0.35,"
+            "noise=alls=3:allf=t+u"
+        ),
+    },
+    "clean_real": {
+        "label": "Clean Realism",
+        "description": "Neutral cleanup with minimal tone shift. Removes flicker and banding while preserving clarity.",
+        "filter": "hqdn3d=1.0:1.0:4:4,deflicker=size=5:mode=pm,deband",
+    },
+}
+
+DEFAULT_CLEANUP_PRESET = os.environ.get("DEFAULT_CLEANUP_PRESET", "homemade_shock").strip()
+
 jobs = {}
 jobs_lock = threading.Lock()
 
@@ -156,6 +179,13 @@ AUTH_ALLOW_REGISTER = str(os.environ.get("AUTH_ALLOW_REGISTER", "1")).strip().lo
     "on",
 )
 AUTH_TOKEN_TTL_HOURS = int(os.environ.get("AUTH_TOKEN_TTL_HOURS", "168"))
+MOCK_OAUTH_ENABLED = str(os.environ.get("MOCK_OAUTH_ENABLED", "1")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+MOCK_OAUTH_PROVIDERS = ["google", "github"]
 DEFAULT_USER = "default"
 
 sessions = {}
@@ -306,6 +336,8 @@ def auth_config():
         "auth_enabled": AUTH_ENABLED,
         "allow_register": AUTH_ALLOW_REGISTER,
         "token_ttl_hours": AUTH_TOKEN_TTL_HOURS,
+        "mock_oauth_enabled": bool(MOCK_OAUTH_ENABLED),
+        "mock_oauth_providers": MOCK_OAUTH_PROVIDERS,
     }
 
 
@@ -366,6 +398,21 @@ def auth_login(payload: AuthRequest):
     return {"token": token, "username": username}
 
 
+@app.post("/api/auth/mock/{provider}")
+def auth_mock(provider: str):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=409, detail="Auth is disabled on this server.")
+    if not MOCK_OAUTH_ENABLED:
+        raise HTTPException(status_code=403, detail="Mock OAuth is disabled on this server.")
+    provider = (provider or "").strip().lower()
+    if provider not in MOCK_OAUTH_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Unknown provider.")
+
+    username = f"{provider}_dev"
+    token = create_session(username)
+    return {"token": token, "username": username}
+
+
 @app.get("/api/user")
 def get_user(username: str = Depends(require_user)):
     return {"username": username, "settings": load_user_settings(username)}
@@ -400,7 +447,10 @@ def serialize_job(job):
     serialized = dict(job)
     serialized["download_url"] = None
     if serialized["status"] == "complete":
-        serialized["download_url"] = f"/api/jobs/{serialized['id']}/video"
+        if serialized.get("job_type") == "cleanup":
+            serialized["download_url"] = f"/api/cleanup/{serialized['id']}/video"
+        else:
+            serialized["download_url"] = f"/api/jobs/{serialized['id']}/video"
     return serialized
 
 
@@ -417,6 +467,59 @@ def save_upload(upload, destination):
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("wb") as buffer:
         shutil.copyfileobj(upload.file, buffer)
+
+
+def resolve_cleanup_preset(preset_key: str) -> dict:
+    key = (preset_key or "").strip() or DEFAULT_CLEANUP_PRESET
+    if key not in VIDEO_CLEANUP_PRESETS:
+        key = DEFAULT_CLEANUP_PRESET
+    return VIDEO_CLEANUP_PRESETS[key]
+
+
+def ffmpeg_path() -> str | None:
+    return shutil.which("ffmpeg")
+
+
+def run_video_cleanup(input_path: Path, output_path: Path, preset_key: str) -> None:
+    ffmpeg_bin = ffmpeg_path()
+    if not ffmpeg_bin:
+        raise RuntimeError("ffmpeg is not available on PATH. Install ffmpeg to enable cleanup.")
+
+    preset = resolve_cleanup_preset(preset_key)
+    filter_chain = preset.get("filter", "").strip()
+    if not filter_chain:
+        raise RuntimeError("Cleanup preset has no filter chain configured.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-i",
+        str(input_path),
+        "-vf",
+        filter_chain,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "slow",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        details = stderr or stdout or "Unknown ffmpeg error."
+        raise RuntimeError(f"Cleanup failed: {details}")
 
 
 def resolve_song_library_path(song_id: str) -> Path:
@@ -572,6 +675,8 @@ def run_job(
     lip_sync_required,
     segment_name,
     prompt_override,
+    segment_prompt_template,
+    generic_config_overrides,
 ):
     job_dir = JOB_ROOT / job_id
     final_video_path = job_dir / "final_music_video.mp4"
@@ -607,6 +712,8 @@ def run_job(
             prompt_override=prompt_text,
             lip_sync_required=lip_sync_required,
             lyrics_text=lyrics_text,
+            segment_prompt_template_override=segment_prompt_template,
+            generic_config_overrides=generic_config_overrides,
         )
     except Exception as exc:
         update_job(
@@ -631,6 +738,8 @@ def run_job(
             "segment_name": segment_name,
             "prompt": prompt_text,
             "segment_prompts": extract_segment_prompts_from_result(result),
+            "segment_prompt_template": segment_prompt_template,
+            "generic_config_overrides": generic_config_overrides,
         }
     )
 
@@ -644,6 +753,36 @@ def run_job(
         reused_cached_audio=result.get("reused_cached_audio", False),
         reused_image_asset=result.get("reused_image_asset", False),
         creative_assets=result.get("creative_assets"),
+    )
+
+
+def run_cleanup_job(username, job_id, video_path, preset_key):
+    job_dir = JOB_ROOT / job_id
+    output_path = job_dir / "cleaned_video.mp4"
+
+    update_job(
+        job_id,
+        status="processing",
+        message="Cleaning up video for a more realistic finish.",
+    )
+
+    try:
+        run_video_cleanup(Path(video_path), output_path, preset_key)
+    except Exception as exc:
+        update_job(
+            job_id,
+            status="error",
+            message="Video cleanup failed.",
+            error=str(exc),
+            traceback=traceback.format_exc(),
+        )
+        return
+
+    update_job(
+        job_id,
+        status="complete",
+        message="Cleanup complete.",
+        cleaned_video=str(output_path),
     )
 
 
@@ -673,6 +812,15 @@ def config():
             for key, preset in VIDEO_STYLE_PRESETS.items()
         ],
         "default_video_style": "cinematic_studio",
+        "cleanup_presets": [
+            {
+                "value": key,
+                "label": preset.get("label", key),
+                "description": preset.get("description", ""),
+            }
+            for key, preset in VIDEO_CLEANUP_PRESETS.items()
+        ],
+        "default_cleanup_preset": DEFAULT_CLEANUP_PRESET,
     }
 
 
@@ -722,11 +870,21 @@ def create_job(
     lip_sync_required: str = Form("1"),
     segment_name: str = Form(""),
     prompt_override: str = Form(""),
+    segment_prompt_template: str = Form(""),
+    generic_config_json: str = Form(""),
 ):
     if song is None and not str(song_id or "").strip():
         raise HTTPException(status_code=422, detail="Provide either an uploaded song file or song_id.")
 
     lip_sync = str(lip_sync_required).strip().lower() in ("1", "true", "yes", "on")
+    generic_config_overrides = {}
+    if generic_config_json and str(generic_config_json).strip():
+        try:
+            generic_config_overrides = json.loads(str(generic_config_json))
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=422, detail="generic_config_json must be valid JSON.")
+        if not isinstance(generic_config_overrides, dict):
+            raise HTTPException(status_code=422, detail="generic_config_json must be a JSON object.")
     resolved_model_name = (model_name or "").strip()
     if not resolved_model_name:
         models = fetch_models_metadata()
@@ -804,6 +962,8 @@ def create_job(
             "segment_name": segment_name,
             "model_name": resolved_model_name,
             "segment_length_seconds": segment_length_seconds,
+            "segment_prompt_template": segment_prompt_template,
+            "generic_config_overrides": generic_config_overrides,
             "final_video": None,
             "session_video_folder": None,
             "video_segments": [],
@@ -830,12 +990,94 @@ def create_job(
             lip_sync,
             segment_name,
             prompt_override,
+            segment_prompt_template,
+            generic_config_overrides,
         ),
         daemon=True,
     )
     thread.start()
 
     return serialize_job(jobs[job_id])
+
+
+@app.post("/api/cleanup", status_code=202)
+def create_cleanup_job(
+    username: str = Depends(require_user),
+    video: UploadFile = File(...),
+    preset: str = Form(""),
+):
+    if video is None:
+        raise HTTPException(status_code=422, detail="Provide a video file to clean up.")
+
+    job_id = uuid.uuid4().hex
+    job_dir = JOB_ROOT / job_id
+    uploads_dir = job_dir / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    video_name = Path(video.filename or "input.mp4").name
+    video_path = uploads_dir / video_name
+    save_upload(video, video_path)
+
+    preset_key = (preset or "").strip() or DEFAULT_CLEANUP_PRESET
+    preset_payload = resolve_cleanup_preset(preset_key)
+
+    with jobs_lock:
+        jobs[job_id] = {
+            "id": job_id,
+            "job_type": "cleanup",
+            "status": "queued",
+            "message": "Queued cleanup job.",
+            "created_at": iso_now(),
+            "updated_at": iso_now(),
+            "username": username,
+            "preset": preset_key,
+            "preset_label": preset_payload.get("label", preset_key),
+            "input_video": str(video_path),
+            "cleaned_video": None,
+            "error": None,
+            "traceback": None,
+        }
+
+    thread = threading.Thread(
+        target=run_cleanup_job,
+        args=(
+            username,
+            job_id,
+            str(video_path),
+            preset_key,
+        ),
+        daemon=True,
+    )
+    thread.start()
+
+    return serialize_job(jobs[job_id])
+
+
+@app.get("/api/cleanup/{job_id}")
+def get_cleanup_job(job_id: str, username: str = Depends(require_user)):
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job or job.get("job_type") != "cleanup":
+        raise HTTPException(status_code=404, detail="Cleanup job not found.")
+    if AUTH_ENABLED and job.get("username") != username:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+    return serialize_job(job)
+
+
+@app.get("/api/cleanup/{job_id}/video")
+def download_cleanup_video(job_id: str, username: str = Depends(require_user)):
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job or job.get("job_type") != "cleanup":
+        raise HTTPException(status_code=404, detail="Cleanup job not found.")
+    if AUTH_ENABLED and job.get("username") != username:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+    if job["status"] != "complete" or not job.get("cleaned_video"):
+        raise HTTPException(status_code=409, detail="Cleanup not complete.")
+    video_path = Path(job["cleaned_video"])
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Output video not found.")
+    return FileResponse(video_path, media_type="video/mp4", filename=video_path.name)
 
 
 @app.get("/api/jobs/{job_id}")

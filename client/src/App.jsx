@@ -62,6 +62,10 @@ function App() {
   const [songTitle, setSongTitle] = useState('')
   const [songArtist, setSongArtist] = useState('')
   const [job, setJob] = useState(null)
+  const [cleanupFile, setCleanupFile] = useState(null)
+  const [cleanupPresets, setCleanupPresets] = useState([])
+  const [cleanupPreset, setCleanupPreset] = useState('homemade_shock')
+  const [cleanupJob, setCleanupJob] = useState(null)
 
   const [defaultModelName, setDefaultModelName] = useState('')
   const [availableModels, setAvailableModels] = useState([])
@@ -71,11 +75,14 @@ function App() {
   const [videoStyle, setVideoStyle] = useState('cinematic_studio')
   const [promptOverride, setPromptOverride] = useState('')
   const [segmentPromptHistory, setSegmentPromptHistory] = useState(null)
+  const [segmentPromptTemplate, setSegmentPromptTemplate] = useState('')
+  const [genericConfigJson, setGenericConfigJson] = useState('')
   const [lipSyncRequired, setLipSyncRequired] = useState(true)
   const [defaultLipSyncModelName, setDefaultLipSyncModelName] = useState('')
   const [defaultNonLipSyncModelName, setDefaultNonLipSyncModelName] = useState('')
 
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isCleanupSubmitting, setIsCleanupSubmitting] = useState(false)
 
   const authHeaders = useMemo(() => (authToken ? { Authorization: `Bearer ${authToken}` } : {}), [authToken])
 
@@ -142,6 +149,8 @@ function App() {
         setLipSyncRequired(Boolean(payload.default_lip_sync_required ?? true))
         setDefaultLipSyncModelName(payload.default_lipsync_model_name ?? '')
         setDefaultNonLipSyncModelName(payload.default_non_lipsync_model_name ?? '')
+        setCleanupPresets(Array.isArray(payload.cleanup_presets) ? payload.cleanup_presets : [])
+        setCleanupPreset(payload.default_cleanup_preset ?? 'homemade_shock')
       } catch (e) {
         if (!cancelled) setError(e.message || String(e))
       }
@@ -201,6 +210,21 @@ function App() {
     return () => window.clearInterval(intervalId)
   }, [apiBase, authHeaders, job])
 
+  useEffect(() => {
+    if (!cleanupJob || !['queued', 'processing'].includes(cleanupJob.status)) return undefined
+    const intervalId = window.setInterval(async () => {
+      try {
+        const resp = await fetch(`${apiBase}/api/cleanup/${cleanupJob.id}`, { headers: { ...authHeaders } })
+        const payload = await resp.json()
+        if (!resp.ok) throw new Error(payload.detail || 'Unable to refresh cleanup status.')
+        setCleanupJob(payload)
+      } catch (e) {
+        setError(e.message || String(e))
+      }
+    }, 5000)
+    return () => window.clearInterval(intervalId)
+  }, [apiBase, authHeaders, cleanupJob])
+
   async function testBackendConnection() {
     const next = normalizeApiBase(apiBaseUrl)
     window.localStorage.setItem(STORAGE_API_BASE_KEY, next)
@@ -251,6 +275,26 @@ function App() {
     window.localStorage.removeItem(STORAGE_AUTH_USER_KEY)
   }
 
+  async function signInMock(provider) {
+    setError('')
+    if (!apiBase) {
+      setError('Set a backend URL first.')
+      setShowAdvanced(true)
+      return
+    }
+    try {
+      const resp = await fetch(`${apiBase}/api/auth/mock/${provider}`, { method: 'POST' })
+      const payload = await resp.json()
+      if (!resp.ok) throw new Error(payload.detail || 'Mock auth failed.')
+      setAuthToken(payload.token)
+      setAuthUser(payload.username)
+      window.localStorage.setItem(STORAGE_AUTH_TOKEN_KEY, payload.token)
+      window.localStorage.setItem(STORAGE_AUTH_USER_KEY, payload.username)
+    } catch (e) {
+      setError(e.message || String(e))
+    }
+  }
+
   async function handleSubmit(event) {
     event.preventDefault()
 
@@ -283,6 +327,8 @@ function App() {
       formData.append('lip_sync_required', lipSyncRequired ? '1' : '0')
       formData.append('segment_name', videoStyle)
       if (promptOverride.trim()) formData.append('prompt_override', promptOverride.trim())
+      if (segmentPromptTemplate.trim()) formData.append('segment_prompt_template', segmentPromptTemplate.trim())
+      if (genericConfigJson.trim()) formData.append('generic_config_json', genericConfigJson.trim())
 
       const resp = await fetch(`${apiBase}/api/jobs`, { method: 'POST', body: formData, headers: { ...authHeaders } })
       const payload = await resp.json()
@@ -295,6 +341,41 @@ function App() {
     }
   }
 
+  async function handleCleanupSubmit(event) {
+    event.preventDefault()
+
+    if (!apiBase) {
+      setError('Set a backend URL first.')
+      setShowAdvanced(true)
+      return
+    }
+    if (authConfig.auth_enabled && !authToken) {
+      setError('Sign in first.')
+      setShowAdvanced(true)
+      return
+    }
+    if (!cleanupFile) {
+      setError('Choose a video file to clean up.')
+      return
+    }
+
+    setError('')
+    setIsCleanupSubmitting(true)
+    try {
+      const formData = new FormData()
+      formData.append('video', cleanupFile)
+      formData.append('preset', cleanupPreset)
+      const resp = await fetch(`${apiBase}/api/cleanup`, { method: 'POST', body: formData, headers: { ...authHeaders } })
+      const payload = await resp.json()
+      if (!resp.ok) throw new Error(payload.detail || 'Unable to start cleanup.')
+      setCleanupJob(payload)
+    } catch (e) {
+      setError(e.message || String(e))
+    } finally {
+      setIsCleanupSubmitting(false)
+    }
+  }
+
   const modelOptions = useMemo(() => {
     if (!availableModels?.length) return []
     const filtered = availableModels.filter((m) => (lipSyncRequired ? m.requires_audio_input : !m.requires_audio_input))
@@ -304,6 +385,7 @@ function App() {
   const selectedModel = useMemo(() => availableModels.find((m) => m.name === modelName), [availableModels, modelName])
   const modelMismatch = Boolean(lipSyncRequired && selectedModel && !selectedModel.requires_audio_input)
   const videoUrl = job?.status === 'complete' ? `${apiBase}${job.download_url}` : ''
+  const cleanupVideoUrl = cleanupJob?.status === 'complete' ? `${apiBase}${cleanupJob.download_url}` : ''
 
   return (
     <main className="app-shell">
@@ -384,6 +466,16 @@ function App() {
                 </div>
               ) : (
                 <form className="auth-form" onSubmit={handleAuthSubmit}>
+                  {authConfig.mock_oauth_enabled ? (
+                    <div className="backend-row">
+                      <button className="secondary-button" type="button" onClick={() => signInMock('google')}>
+                        Sign in with Google (mock)
+                      </button>
+                      <button className="secondary-button" type="button" onClick={() => signInMock('github')}>
+                        Sign in with GitHub (mock)
+                      </button>
+                    </div>
+                  ) : null}
                   <div className="auth-mode">
                     <button
                       className={`secondary-button ${authMode === 'login' ? 'active' : ''}`}
@@ -480,34 +572,49 @@ function App() {
             )}
           </label>
 
-          <label className="field-card">
-            <span className="field-label">Master prompt override (optional)</span>
-            <textarea
-              className="lyrics-textarea"
-              placeholder="Paste a master prompt to override the concept preset."
-              rows={6}
-              value={promptOverride}
-              onChange={(e) => setPromptOverride(e.target.value)}
-            />
-            <p className="field-hint">Use prompt history to reapply a previous master prompt.</p>
-          </label>
-
-          {segmentPromptHistory ? (
+          {showAdvanced ? (
             <div className="field-card">
-              <div className="field-label">Segment prompt history (read-only)</div>
+              <div className="field-label">Prompt engine (advanced)</div>
               <textarea
                 className="lyrics-textarea"
-                readOnly
-                rows={8}
-                value={JSON.stringify(segmentPromptHistory, null, 2)}
+                placeholder="Master prompt override (optional)."
+                rows={6}
+                value={promptOverride}
+                onChange={(e) => setPromptOverride(e.target.value)}
               />
-              <button
-                className="launch-button"
-                type="button"
-                onClick={() => navigator.clipboard.writeText(JSON.stringify(segmentPromptHistory, null, 2))}
-              >
-                Copy segment prompts
-              </button>
+              <textarea
+                className="lyrics-textarea"
+                placeholder="Segment prompt template override (optional)."
+                rows={6}
+                value={segmentPromptTemplate}
+                onChange={(e) => setSegmentPromptTemplate(e.target.value)}
+              />
+              <textarea
+                className="lyrics-textarea"
+                placeholder='Generic config JSON override (optional). Example: {"narrative_mode":"music_video","escalation_curve":"ease_in_out"}'
+                rows={6}
+                value={genericConfigJson}
+                onChange={(e) => setGenericConfigJson(e.target.value)}
+              />
+              <p className="field-hint">Use prompt history to reapply a previous master prompt + config.</p>
+              {segmentPromptHistory ? (
+                <>
+                  <div className="field-label">Segment prompt history (read-only)</div>
+                  <textarea
+                    className="lyrics-textarea"
+                    readOnly
+                    rows={8}
+                    value={JSON.stringify(segmentPromptHistory, null, 2)}
+                  />
+                  <button
+                    className="launch-button"
+                    type="button"
+                    onClick={() => navigator.clipboard.writeText(JSON.stringify(segmentPromptHistory, null, 2))}
+                  >
+                    Copy segment prompts
+                  </button>
+                </>
+              ) : null}
             </div>
           ) : null}
 
@@ -617,6 +724,10 @@ function App() {
                         if (typeof entry.lip_sync_required === 'boolean') setLipSyncRequired(entry.lip_sync_required)
                         if (entry.prompt) setPromptOverride(entry.prompt)
                         if (entry.segment_prompts) setSegmentPromptHistory(entry.segment_prompts)
+                        if (entry.segment_prompt_template) setSegmentPromptTemplate(entry.segment_prompt_template)
+                        if (entry.generic_config_overrides) {
+                          setGenericConfigJson(JSON.stringify(entry.generic_config_overrides, null, 2))
+                        }
                       }}
                     >
                       <div className="history-main">
@@ -649,6 +760,56 @@ function App() {
           <video className="result-video" controls src={videoUrl} />
         ) : (
           <div className="video-placeholder">The final stitched MP4 will appear here once rendering completes.</div>
+        )}
+      </section>
+
+      <section className="output-panel">
+        <div className="panel-header">
+          <h2>Cleanup</h2>
+          <span className={`status-pill ${cleanupJob?.status ?? 'idle'}`}>{cleanupJob?.status ?? 'idle'}</span>
+        </div>
+
+        <form className="field-card" onSubmit={handleCleanupSubmit}>
+          <div className="field-label">Upload video to clean</div>
+          <input
+            accept="video/*,.mp4,.mov,.mkv,.webm"
+            type="file"
+            onChange={(e) => setCleanupFile(e.target.files?.[0] ?? null)}
+          />
+          <strong>{cleanupFile ? `${cleanupFile.name} · ${formatBytes(cleanupFile.size)}` : 'No file selected'}</strong>
+
+          <label className="field-label">Cleanup preset</label>
+          <select value={cleanupPreset} onChange={(e) => setCleanupPreset(e.target.value)}>
+            {(cleanupPresets.length ? cleanupPresets : [{ value: 'homemade_shock', label: 'Homemade Shock' }])
+              .slice()
+              .sort((a, b) => String(a.label || a.value).localeCompare(String(b.label || b.value)))
+              .map((preset) => (
+                <option key={preset.value} value={preset.value}>
+                  {preset.label || prettyLabel(preset.value)}
+                </option>
+              ))}
+          </select>
+          {cleanupPresets.length ? (
+            <p className="field-hint">
+              {(cleanupPresets.find((preset) => preset.value === cleanupPreset) || {}).description || ''}
+            </p>
+          ) : null}
+
+          <button className="launch-button" disabled={isCleanupSubmitting} type="submit">
+            {isCleanupSubmitting ? 'Starting cleanup...' : 'Clean up video'}
+          </button>
+        </form>
+
+        {cleanupJob?.message ? <p className="status-copy">{cleanupJob.message}</p> : null}
+        {cleanupVideoUrl ? (
+          <>
+            <a className="download-link" href={cleanupVideoUrl}>
+              Download cleaned MP4
+            </a>
+            <video className="result-video" controls src={cleanupVideoUrl} />
+          </>
+        ) : (
+          <div className="video-placeholder">Upload a video to clean and the refined MP4 will appear here.</div>
         )}
       </section>
     </main>

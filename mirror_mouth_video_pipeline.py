@@ -91,6 +91,39 @@ def hash_file(path, chunk_size=1024 * 1024):
     return hasher.hexdigest()
 
 
+def extract_reference_frame(video_path, output_dir):
+    if not video_path:
+        return None
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Reference video not found: {video_path}")
+
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        raise RuntimeError("ffmpeg is required to extract a reference frame from video.")
+
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    frame_path = os.path.join(output_dir, f"{base_name}_frame.png")
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-i",
+        video_path,
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        frame_path,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        details = stderr or stdout or "Unknown ffmpeg error."
+        raise RuntimeError(f"Failed to extract reference frame: {details}")
+    return frame_path
+
+
 def sha256_text(value):
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
 
@@ -124,6 +157,10 @@ if FFMPEG_PATH:
 
 INPUT_MP3 = normalize_env_path(os.environ.get("INPUT_MP3")) or "full_song.mp3"
 REFERENCE_IMAGE = normalize_env_path(os.environ.get("REFERENCE_IMAGE")) or "reference_image.png"
+REFERENCE_VIDEO = normalize_env_path(os.environ.get("REFERENCE_VIDEO")) or "reference_video.mp4"
+REFERENCE_VIDEO_FRAME_ROOT = (
+    normalize_env_path(os.environ.get("REFERENCE_VIDEO_FRAME_ROOT")) or "job_runs/reference_frames"
+)
 REFERENCE_IMAGES = [
     normalize_env_path(value)
     for value in os.environ.get("REFERENCE_IMAGES", "").split(",")
@@ -1239,6 +1276,7 @@ def run_pipeline(
     input_mp3=INPUT_MP3,
     reference_image=REFERENCE_IMAGE,
     reference_images=None,
+    reference_video=REFERENCE_VIDEO,
     segment_length_seconds=SEGMENT_LENGTH_SECONDS,
     output_audio_folder=OUTPUT_AUDIO_FOLDER,
     output_video_root=OUTPUT_VIDEO_FOLDER,
@@ -1275,6 +1313,12 @@ def run_pipeline(
             raise FileNotFoundError(f"Input MP3 not found: {input_mp3}")
         if reference_images is None:
             reference_images = REFERENCE_IMAGES or ([reference_image] if reference_image else [])
+        if reference_video:
+            if not os.path.exists(reference_video):
+                raise FileNotFoundError(f"Reference video not found: {reference_video}")
+            extracted_frame = extract_reference_frame(reference_video, REFERENCE_VIDEO_FRAME_ROOT)
+            if extracted_frame:
+                reference_images = [extracted_frame] + list(reference_images or [])
         reference_images = [path for path in reference_images if path]
         if not reference_images:
             raise ValueError("No reference images provided.")
