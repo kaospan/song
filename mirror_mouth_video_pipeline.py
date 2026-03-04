@@ -1308,6 +1308,7 @@ def run_pipeline(
 ):
     completed_successfully = False
     run_archive_dir = None
+    use_extracted_start_frame = False
     try:
         if not os.path.exists(input_mp3):
             raise FileNotFoundError(f"Input MP3 not found: {input_mp3}")
@@ -1318,7 +1319,11 @@ def run_pipeline(
                 raise FileNotFoundError(f"Reference video not found: {reference_video}")
             extracted_frame = extract_reference_frame(reference_video, REFERENCE_VIDEO_FRAME_ROOT)
             if extracted_frame:
-                reference_images = [extracted_frame] + list(reference_images or [])
+                use_extracted_start_frame = True
+                if reference_images:
+                    reference_images = [extracted_frame] + list(reference_images or [])
+                else:
+                    reference_images = [extracted_frame]
         reference_images = [path for path in reference_images if path]
         if not reference_images:
             raise ValueError("No reference images provided.")
@@ -1749,7 +1754,9 @@ def run_pipeline(
             else:
                 print("Model does not require audio; skipping audio upload.")
     
-            include_reference_images = (idx == 0 and len(image_asset_ids) > 1)
+            include_reference_images = (
+                idx == 0 and len(image_asset_ids) > 1 and not use_extracted_start_frame
+            )
     
             segment_prompt = (
                 segment_prompt_texts[idx] if idx < len(segment_prompt_texts) else prompt_text

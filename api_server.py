@@ -130,9 +130,43 @@ VIDEO_STYLE_PRESETS = {
             "Editing rhythm: impact moments only; do not overuse."
         ),
     },
+    "backdrop_screen": {
+        "label": "Backdrop Screen (Diegetic Display)",
+        "description": "Place the generated video inside a small real-world screen or mirror; the environment stays realistic while the embedded video is abstract and colorful.",
+        "direction": (
+            "Primary framing: the music video appears as a smaller diegetic surface inside a realistic scene.\n"
+            "Pick one backdrop per segment (or hold a single backdrop for the whole piece):\n"
+            "- public bathroom mirror\n"
+            "- subway station advertisement screen\n"
+            "- window on a busy street\n"
+            "- framed art on a wall\n"
+            "- bus stop poster case\n"
+            "- gallery lightbox\n"
+            "- arcade cabinet screen\n"
+            "- elevator mirror with a small inset display\n"
+            "- shop TV behind glass\n"
+            "- phone screen in someone's hand (very steady)\n"
+            "Backdrop treatment: photoreal, grounded, handheld imperfections only if motivated, but keep the screen stable and readable.\n"
+            "Embedded video content: raw, cartoony, abstract drawing of rush-hour life—people moving fast, cars, trains, urban cityscape. Minimal detail, high charm, colorful, eye-catching.\n"
+            "If a person appears in the scene, keep them secondary; preserve identity only if reference images indicate a subject."
+        ),
+    },
 }
 
 VIDEO_CLEANUP_PRESETS = {
+    "cinematic_pro": {
+        "label": "Cinematic Pro",
+        "description": "Cinema-grade cleanup: stabilize texture, remove flicker, add gentle 35mm grain and filmic contrast.",
+        "filter": (
+            "hqdn3d=1.0:1.0:4:4,"
+            "deflicker=size=7:mode=pm,"
+            "deband,"
+            "eq=contrast=1.08:brightness=-0.01:saturation=1.02,"
+            "unsharp=5:5:0.25:3:3:0.15,"
+            "vignette=0.25,"
+            "noise=alls=2.2:allf=t+u"
+        ),
+    },
     "homemade_shock": {
         "label": "Homemade Shock",
         "description": "Reduce AI artifacts, keep a raw homemade feel, and deepen the dark, unsettling tone.",
