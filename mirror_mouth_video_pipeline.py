@@ -647,6 +647,7 @@ def pick_fallback_model(models, require_audio_input):
 
     if require_audio_input:
         preferred = [
+            "grok",
             "kling ai avatar v2 standard",
             "hedra avatar",
         ]
@@ -960,6 +961,9 @@ def load_cached_audio_segments(output_audio_folder, input_mp3_hash, segment_leng
     manifest_path = os.path.join(output_audio_folder, "segments_manifest.json")
     manifest = load_json_file(manifest_path)
     if not manifest:
+        cached_folder = resolve_audio_cache_folder(input_mp3_hash, segment_length_seconds)
+        if cached_folder and os.path.normpath(cached_folder) != os.path.normpath(output_audio_folder):
+            return load_cached_audio_segments(cached_folder, input_mp3_hash, segment_length_seconds)
         return None
 
     if manifest.get("input_mp3_hash") != input_mp3_hash:
@@ -987,6 +991,21 @@ def load_cached_audio_segments(output_audio_folder, input_mp3_hash, segment_leng
     return audio_files
 
 
+def resolve_audio_cache_folder(input_mp3_hash, segment_length_seconds):
+    if not AUDIO_CACHE_INDEX_PATH:
+        return None
+    index = load_json_file(AUDIO_CACHE_INDEX_PATH) or {}
+    entry = index.get(input_mp3_hash)
+    if not entry:
+        return None
+    if entry.get("segment_length_seconds") != segment_length_seconds:
+        return None
+    folder = entry.get("path")
+    if folder and os.path.isdir(folder):
+        return folder
+    return None
+
+
 def write_segments_manifest(output_audio_folder, input_mp3, input_mp3_hash, segment_length_seconds, audio_files):
     manifest_path = os.path.join(output_audio_folder, "segments_manifest.json")
     manifest = {
@@ -1001,6 +1020,15 @@ def write_segments_manifest(output_audio_folder, input_mp3, input_mp3_hash, segm
         "created_at": datetime.now().isoformat(),
     }
     write_json_file(manifest_path, manifest)
+    if AUDIO_CACHE_INDEX_PATH:
+        index = load_json_file(AUDIO_CACHE_INDEX_PATH) or {}
+        index[input_mp3_hash] = {
+            "path": os.path.abspath(output_audio_folder),
+            "segment_length_seconds": segment_length_seconds,
+            "segment_count": len(audio_files),
+            "updated_at": datetime.now().isoformat(),
+        }
+        write_json_file(AUDIO_CACHE_INDEX_PATH, index)
 
 
 def split_audio(input_mp3, output_audio_folder, segment_length_seconds):

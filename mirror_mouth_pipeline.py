@@ -610,6 +610,7 @@ def pick_fallback_model(models, require_audio_input):
 
     if require_audio_input:
         preferred = [
+            "grok",
             "kling ai avatar v2 standard",
             "hedra avatar",
         ]
