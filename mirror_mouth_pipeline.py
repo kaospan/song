@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 
 import requests
@@ -50,12 +51,31 @@ def normalize_env_path(value):
     return os.path.normpath(value)
 
 
+def _now_stamp():
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+
+
+def _remove_dir_if_empty(path):
+    if not path or not os.path.isdir(path):
+        return
+    try:
+        with os.scandir(path) as it:
+            for _ in it:
+                return
+        os.rmdir(path)
+    except OSError:
+        return
+
+
 def sanitize_filename_component(value):
     if value is None:
         return None
 
-    sanitized = re.sub(r'[<>:"/\\\\|?*\\x00-\\x1f]', "_", value)
+    # Drop control chars entirely, then replace filesystem-unsafe characters.
+    sanitized = re.sub(r"[\\x00-\\x1f]", "", value)
+    sanitized = re.sub(r'[<>:"/\\\\|?*]', "_", sanitized)
     sanitized = re.sub(r"\\s+", " ", sanitized).strip()
+    sanitized = sanitized.strip("._- ")
     return sanitized or None
 
 
@@ -134,6 +154,7 @@ SONG_ARTIST = os.environ.get("SONG_ARTIST")
 IMAGE_ASSET_CACHE_PATH = (
     normalize_env_path(os.environ.get("IMAGE_ASSET_CACHE_PATH")) or "job_runs/asset_cache.json"
 )
+PROMPT_CACHE_ROOT = normalize_env_path(os.environ.get("PROMPT_CACHE_ROOT")) or "job_runs/prompt_cache"
 AUDIO_CACHE_ROOT = normalize_env_path(os.environ.get("AUDIO_CACHE_ROOT"))
 REUSE_IMAGE_ASSET = os.environ.get("REUSE_IMAGE_ASSET", "1").strip().lower() not in ("0", "false", "no")
 FORCE_IMAGE_UPLOAD = os.environ.get("FORCE_IMAGE_UPLOAD", "0").strip().lower() in ("1", "true", "yes")
@@ -238,41 +259,6 @@ def load_lyrics_text(path):
     return text or None
 
 
-def normalize_lyrics_lines(lyrics_text):
-    if not lyrics_text:
-        return []
-    lines = []
-    for raw in lyrics_text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.startswith(("#", "//")):
-            continue
-        lines.append(line)
-    return lines
-
-
-def distribute_lyrics(lines, segment_count, max_lines_per_segment):
-    if segment_count <= 0:
-        return []
-    if not lines:
-        return [""] * segment_count
-
-    # Evenly distribute lines across segments.
-    per_segment = max(1, math.ceil(len(lines) / segment_count))
-    per_segment = min(per_segment, max_lines_per_segment)
-    segments = []
-    cursor = 0
-    for _ in range(segment_count):
-        chunk = lines[cursor : cursor + per_segment]
-        cursor += per_segment
-        segments.append("\n".join(chunk))
-    # If we ran out of lines early, pad with empty strings.
-    if len(segments) < segment_count:
-        segments.extend([""] * (segment_count - len(segments)))
-    return segments[:segment_count]
-
-
 class StaticMasterPromptEngine(GenericPromptEngine):
     """
     Uses a provided master prompt verbatim and generates per-segment prompts via config templates.
@@ -343,294 +329,166 @@ def write_text_file(path, text):
         f.write((text or "").rstrip() + "\n")
 
 
-def format_mmss(seconds):
-    seconds = max(0, int(seconds))
-    mm, ss = divmod(seconds, 60)
-    return f"{mm:02d}:{ss:02d}"
+@dataclass(frozen=True)
+class PromptAssets:
+    run_dir: str
+    master_prompt_path: str | None
+    script_path: str | None
+    timestamps_path: str
+    segments_path: str
+    prompt_bundle_path: str | None
 
 
-def build_segment_timestamp_map(segment_count, segment_length_seconds, segment_durations_ms=None):
-    """
-    Returns [{segment,start,end,timestamp}, ...] using real segment durations when available.
-    """
-    segment_length_seconds = max(1, int(segment_length_seconds))
-    durations = []
-    if segment_durations_ms:
-        durations = [max(0, int(ms)) for ms in segment_durations_ms[:segment_count]]
-        if len(durations) < segment_count:
-            durations.extend([segment_length_seconds * 1000] * (segment_count - len(durations)))
-    else:
-        durations = [segment_length_seconds * 1000] * segment_count
-
-    mapping = []
-    cursor_ms = 0
-    for idx in range(segment_count):
-        start_s = cursor_ms // 1000
-        cursor_ms += durations[idx]
-        end_s = cursor_ms // 1000
-        mapping.append(
-            {
-                "segment": idx + 1,
-                "start": format_mmss(start_s),
-                "end": format_mmss(end_s),
-                "timestamp": f"{format_mmss(start_s)}-{format_mmss(end_s)}",
-            }
-        )
-    return mapping
-
-
-def _tokenize_words(text):
-    if not text:
-        return []
-    # ASCII-ish tokenization is fine here; it's a heuristic for "theme" text.
-    words = re.findall(r"[A-Za-z']{3,}", text.lower())
-    stop = {
-        "the",
-        "and",
-        "but",
-        "for",
-        "with",
-        "that",
-        "this",
-        "your",
-        "you",
-        "i",
-        "im",
-        "i'm",
-        "ive",
-        "i've",
-        "dont",
-        "don't",
-        "when",
-        "then",
-        "into",
-        "from",
-        "back",
-        "just",
-        "like",
-        "feel",
-        "still",
-        "every",
-        "what",
-        "where",
-        "will",
-        "does",
-        "dont",
-        "know",
-        "over",
-        "under",
-    }
-    return [w for w in words if w not in stop]
-
-
-def infer_global_theme(lyrics_text, song_title=None):
-    words = _tokenize_words(lyrics_text or "")
-    if not words:
-        return (song_title or "Music video") + ": cohesive escalating narrative driven by the vocal tone."
-
-    counts = {}
-    for w in words:
-        counts[w] = counts.get(w, 0) + 1
-    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
-    keywords = [w for w, _ in top]
-    title = (song_title or "").strip()
-    title_prefix = f"{title} — " if title else ""
-    # Keep it specific without over-claiming.
-    return (
-        f"{title_prefix}a psychologically tense, nocturnal descent where the lyrics' core motifs "
-        f"({', '.join(keywords[:6])}) manifest as subtle, escalating visual anomalies while the performance stays grounded."
-    )
-
-
-def classify_act(idx, segment_count):
-    if segment_count <= 0:
-        return "Intro"
-    t = (idx + 1) / segment_count
-    if t <= 0.15:
-        return "Act 1 — Intro"
-    if t <= 0.40:
-        return "Act 2 — Build"
-    if t <= 0.65:
-        return "Act 3 — Hook"
-    if t <= 0.85:
-        return "Act 4 — Climax"
-    return "Act 5 — Resolution"
-
-
-def build_scene_direction_prompt(idx, segment_count, timestamp, segment_lyrics, theme, intensity_bias="auto"):
-    act = classify_act(idx, segment_count)
-    segment_no = idx + 1
-
-    # Detect chorus/bridge markers from the mapped lyrics chunk (rough but useful).
-    lower = (segment_lyrics or "").lower()
-    is_chorus = "chorus" in lower
-    is_bridge = "bridge" in lower
-
-    progress = 0 if segment_count <= 1 else idx / (segment_count - 1)
-    base_level = 1 + int(progress * 4)  # 1..5
-    if is_chorus:
-        base_level = min(5, base_level + 1)
-    if is_bridge:
-        base_level = min(5, base_level + 1)
-
-    # Escalating anomalies (kept short; segment-specific).
-    anomaly_steps = [
-        "A faint pencil-sketch crosshatch briefly appears under the skin for 1–2 frames (5% opacity), then disappears.",
-        "Ink-like sketch veins trace along the jaw/neck in a thin, non-glowing line; subtle, intermittent, never pulsing.",
-        "City bokeh behind the subject momentarily collapses into a hand-drawn outline on beat accents, then returns to photoreal.",
-        "The subject's shadow lags reality by 1–2 frames during a lyric hit, then re-syncs; no horror jump, just uncanny.",
-        "Photoreal and sketch layers fully interlock: the sketch becomes a controlled overlay that breathes with the vocal dynamics, never text-like.",
-    ]
-    anomaly = anomaly_steps[max(0, min(4, base_level - 1))]
-
-    # Camera/lighting cues for this segment; still respects MASTER_PROMPT lock.
-    camera = (
-        "Maintain the continuous clockwise orbit; keep motion smooth and inevitable. "
-        "Micro-adjust orbit speed only to match the musical energy—no reversals, no shake."
-    )
-    lighting = (
-        "HDR cinematic lighting with moody blue/orange separation; dramatic shadow shape stays consistent. "
-        "Keep skin texture realistic; no stylization."
-    )
-    performance = (
-        "Precise, audio-driven lip sync; micro-expressions follow the lyric stress. "
-        "Blinking remains natural and sparse; avoid blinking on consonant attacks and sustained notes."
-    )
-
-    hook = (
-        "Hook rule: within the first 3 seconds, introduce one subtle anomaly (single beat), then let it dissolve."
-        if segment_no == 1
-        else "Within the first 3 seconds, introduce a subtle anomaly beat, then return to baseline."
-    )
-
-    return (
-        f"SEGMENT {segment_no:02d} ({timestamp}) — {act}\n"
-        f"Theme: {theme}\n"
-        f"{hook}\n"
-        f"Camera: {camera}\n"
-        f"Lighting/Look: {lighting}\n"
-        f"Performance: {performance}\n"
-        f"Escalation Level: {base_level}/5\n"
-        f"Anomaly: {anomaly}\n"
-        "Continuity: the first frame must feel like a seamless continuation from the prior segment; no reset.\n"
-        "Text/Artifacts: absolutely no on-screen text, subtitles, lyrics, captions, logos, or gibberish marks."
-    ).strip()
-
-
-def generate_segment_prompt_assets(
-    session_video_folder,
+def _prompt_cache_fingerprint(
     master_prompt_text,
     lyrics_text,
-    lyrics_by_segment,
     segment_length_seconds,
-    segment_durations_ms=None,
-    song_title=None,
-    song_artist=None,
-    video_style=None,
+    segment_durations_ms,
+    song_title,
+    song_artist,
+    input_mp3_hash,
+    segment_prompt_template,
+    lyrics_max_lines_per_segment,
 ):
-    """
-    Generate structured, per-segment prompts driven by lyrics, with a single locked MASTER_PROMPT.
-    Writes:
-      - creative/master_prompt.txt
-      - creative/lyrics.txt
-      - creative/timestamp_map.json
-      - creative/lyrics_by_segment.json
-      - creative/segments_prompts.json
-    """
-    segment_count = len(lyrics_by_segment)
-    creative_dir = os.path.join(session_video_folder, "creative")
-    os.makedirs(creative_dir, exist_ok=True)
-
-    master_prompt_path = os.path.join(creative_dir, "master_prompt.txt")
-    lyrics_path = os.path.join(creative_dir, "lyrics.txt")
-    timestamp_map_path = os.path.join(creative_dir, "timestamp_map.json")
-    lyrics_map_path = os.path.join(creative_dir, "lyrics_by_segment.json")
-    segments_prompts_path = os.path.join(creative_dir, "segments_prompts.json")
-    # Convenience copies at the session root (keeps user-facing filenames predictable).
-    root_master_prompt_path = os.path.join(session_video_folder, "master_prompt.txt")
-    root_lyrics_path = os.path.join(session_video_folder, "lyrics.txt")
-    root_timestamp_map_path = os.path.join(session_video_folder, "timestamp_map.json")
-    root_segments_prompts_path = os.path.join(session_video_folder, "segments_prompts.json")
-
-    write_text_file(master_prompt_path, master_prompt_text)
-    write_text_file(root_master_prompt_path, master_prompt_text)
-    if lyrics_text:
-        write_text_file(lyrics_path, lyrics_text)
-        write_text_file(root_lyrics_path, lyrics_text)
-    else:
-        write_text_file(lyrics_path, "")
-        write_text_file(root_lyrics_path, "")
-
-    timestamp_map = build_segment_timestamp_map(
-        segment_count, segment_length_seconds, segment_durations_ms=segment_durations_ms
-    )
-    write_json_file(timestamp_map_path, timestamp_map)
-    write_json_file(root_timestamp_map_path, timestamp_map)
-
-    lyrics_map = {
-        f"segment_{idx+1:02d}": (lyrics_by_segment[idx] or "")
-        for idx in range(segment_count)
-    }
-    write_json_file(lyrics_map_path, lyrics_map)
-
-    theme = infer_global_theme(lyrics_text, song_title=song_title)
-    segments = []
-    for idx in range(segment_count):
-        ts = timestamp_map[idx]["timestamp"]
-        segment_lyrics = lyrics_by_segment[idx] if idx < segment_count else ""
-        scene_direction = build_scene_direction_prompt(
-            idx,
-            segment_count,
-            ts,
-            segment_lyrics,
-            theme,
-        )
-
-        assembled_prompt = (
-            master_prompt_text.strip()
-            + f"\n\nSEGMENT: {idx:03d} ({ts})"
-            + (f"\n\nLYRICS (for this segment; do not render as text):\n{segment_lyrics}" if segment_lyrics else "")
-            + "\n\nSCENE DIRECTION:\n"
-            + scene_direction
-        )
-
-        segments.append(
-            {
-                "segmentNumber": idx + 1,
-                "timestamp": ts,
-                "lyricsLines": segment_lyrics or "",
-                "sceneDirectionPrompt": scene_direction,
-                "assembledPrompt": assembled_prompt,
-            }
-        )
-
     payload = {
-        "MASTER_PROMPT": master_prompt_text.strip(),
-        "video_style": video_style or "",
+        "master_prompt_text": master_prompt_text or "",
+        "lyrics_text": lyrics_text or "",
+        "segment_length_seconds": float(segment_length_seconds),
+        "segment_durations_ms": [int(ms) for ms in (segment_durations_ms or [])],
         "song_title": song_title or "",
         "song_artist": song_artist or "",
-        "segment_length_seconds": int(segment_length_seconds),
-        "segment_count": segment_count,
-        "global_theme": theme,
-        "segments": segments,
+        "input_mp3_hash": input_mp3_hash or "",
+        "segment_prompt_template": segment_prompt_template or "",
+        "lyrics_max_lines_per_segment": int(lyrics_max_lines_per_segment),
     }
-    write_json_file(segments_prompts_path, payload)
-    write_json_file(root_segments_prompts_path, payload)
-
-    return {
-        "creative_dir": os.path.abspath(creative_dir),
-        "master_prompt_path": os.path.abspath(master_prompt_path),
-        "lyrics_path": os.path.abspath(lyrics_path),
-        "timestamp_map_path": os.path.abspath(timestamp_map_path),
-        "lyrics_map_path": os.path.abspath(lyrics_map_path),
-        "segments_prompts_path": os.path.abspath(segments_prompts_path),
-        "root_master_prompt_path": os.path.abspath(root_master_prompt_path),
-        "root_lyrics_path": os.path.abspath(root_lyrics_path),
-        "root_timestamp_map_path": os.path.abspath(root_timestamp_map_path),
-        "root_segments_prompts_path": os.path.abspath(root_segments_prompts_path),
-    }
+    return sha256_text(json.dumps(payload, sort_keys=True))
 
 
+def _prompt_cache_dir(prompt_cache_root, output_stem, fingerprint):
+    return os.path.join(prompt_cache_root, output_stem, fingerprint)
+
+
+def _prompt_cache_valid(cache_dir):
+    required = ["segments.json", "timestamps.json", "prompt_bundle.json"]
+    return all(os.path.exists(os.path.join(cache_dir, name)) for name in required)
+
+
+def _prompt_assets_from_dir(run_dir):
+    def _path(name):
+        path = os.path.join(run_dir, name)
+        return os.path.abspath(path) if os.path.exists(path) else None
+
+    return PromptAssets(
+        run_dir=os.path.abspath(run_dir),
+        master_prompt_path=_path("master_prompt.txt"),
+        script_path=_path("script.txt"),
+        timestamps_path=os.path.abspath(os.path.join(run_dir, "timestamps.json")),
+        segments_path=os.path.abspath(os.path.join(run_dir, "segments.json")),
+        prompt_bundle_path=_path("prompt_bundle.json"),
+    )
+
+
+def build_or_load_prompt_assets(
+    *,
+    prompt_cache_root,
+    output_stem,
+    master_prompt_text,
+    lyrics_text,
+    segment_length_seconds,
+    segment_durations_ms,
+    song_title,
+    song_artist,
+    input_mp3_hash,
+    segment_prompt_template,
+    lyrics_max_lines_per_segment,
+    segments_override,
+):
+    if not prompt_cache_root:
+        prompt_cache_root = None
+
+    fingerprint = _prompt_cache_fingerprint(
+        master_prompt_text=master_prompt_text,
+        lyrics_text=lyrics_text,
+        segment_length_seconds=segment_length_seconds,
+        segment_durations_ms=segment_durations_ms,
+        song_title=song_title,
+        song_artist=song_artist,
+        input_mp3_hash=input_mp3_hash,
+        segment_prompt_template=segment_prompt_template,
+        lyrics_max_lines_per_segment=lyrics_max_lines_per_segment,
+    )
+
+    cache_dir = None
+    if prompt_cache_root:
+        cache_dir = _prompt_cache_dir(prompt_cache_root, output_stem, fingerprint)
+        if _prompt_cache_valid(cache_dir):
+            return _prompt_assets_from_dir(cache_dir)
+
+    run_dir = cache_dir or os.path.join("runs", _now_stamp())
+    os.makedirs(run_dir, exist_ok=True)
+
+    generic_config = GenericVideoPipelineConfig(
+        segment_duration_seconds=float(segment_length_seconds),
+        narrative_mode="music_video",
+        script_max_lines_per_segment=max(1, int(lyrics_max_lines_per_segment)),
+        segment_prompt_template=segment_prompt_template,
+        export_prompt_bundle=True,
+    )
+    generic_engine = StaticMasterPromptEngine(generic_config, master_prompt_text)
+    generic_outputs = build_generic_prompt_package(
+        GenericPipelineInputs(
+            media_path=None,
+            script_text=lyrics_text or "",
+            metadata={
+                "song_title": song_title or "",
+                "song_artist": song_artist or "",
+            },
+        ),
+        config=generic_config,
+        engine=generic_engine,
+        run_dir=run_dir,
+        segments_override=segments_override,
+        media_duration_ms_override=sum(segment_durations_ms or []),
+        media_sha256_override=input_mp3_hash,
+    )
+
+    if cache_dir:
+        write_json_file(
+            os.path.join(cache_dir, "prompt_manifest.json"),
+            {
+                "fingerprint": fingerprint,
+                "created_at": datetime.now().isoformat(),
+                "output_stem": output_stem,
+                "segment_count": len(segment_durations_ms or []),
+            },
+        )
+
+    return PromptAssets(
+        run_dir=generic_outputs.run_dir,
+        master_prompt_path=generic_outputs.master_prompt_path,
+        script_path=generic_outputs.script_path,
+        timestamps_path=generic_outputs.timestamps_path,
+        segments_path=generic_outputs.segments_path,
+        prompt_bundle_path=generic_outputs.prompt_bundle_path,
+    )
+
+
+def sync_prompt_assets_to_session(session_video_folder, prompt_assets):
+    prompt_assets_dir = os.path.join(session_video_folder, "creative")
+    os.makedirs(prompt_assets_dir, exist_ok=True)
+
+    for filename in [
+        "master_prompt.txt",
+        "script.txt",
+        "timestamps.json",
+        "segments.json",
+        "prompt_bundle.json",
+    ]:
+        src = os.path.join(prompt_assets.run_dir, filename)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(prompt_assets_dir, filename))
+
+    return prompt_assets_dir
 def fetch_models():
     url = f"{API_BASE}/models"
     resp = http_session().get(url, headers=get_headers(), timeout=30)
@@ -1317,287 +1175,190 @@ def run_pipeline(
     default_lipsync_model_name=DEFAULT_LIPSYNC_MODEL_NAME,
     default_non_lipsync_model_name=DEFAULT_NON_LIPSYNC_MODEL_NAME,
 ):
-    if not os.path.exists(input_mp3):
-        raise FileNotFoundError(f"Input MP3 not found: {input_mp3}")
-    if reference_images is None:
-        reference_images = REFERENCE_IMAGES or ([reference_image] if reference_image else [])
-    reference_images = [path for path in reference_images if path]
-    if not reference_images:
-        raise ValueError("No reference images provided.")
-    missing = [path for path in reference_images if not os.path.exists(path)]
-    if missing:
-        raise FileNotFoundError(f"Reference image(s) not found: {', '.join(missing)}")
+    completed_successfully = False
+    run_archive_dir = None
+    try:
+        if not os.path.exists(input_mp3):
+            raise FileNotFoundError(f"Input MP3 not found: {input_mp3}")
+        if reference_images is None:
+            reference_images = REFERENCE_IMAGES or ([reference_image] if reference_image else [])
+        reference_images = [path for path in reference_images if path]
+        if not reference_images:
+            raise ValueError("No reference images provided.")
+        missing = [path for path in reference_images if not os.path.exists(path)]
+        if missing:
+            raise FileNotFoundError(f"Reference image(s) not found: {', '.join(missing)}")
 
-    input_mp3_hash = hash_file(input_mp3)
-    output_stem = build_output_stem(
-        song_title,
-        song_artist,
-        os.path.splitext(os.path.basename(input_mp3))[0],
-    )
-    if audio_cache_root:
-        output_audio_folder = os.path.join(audio_cache_root, output_stem, input_mp3_hash)
-    else:
-        output_audio_folder = os.path.join(output_audio_folder, output_stem, input_mp3_hash)
-
-    # Keep local runs organized by title. API server passes per-job output roots and won't hit this.
-    if output_video_root == OUTPUT_VIDEO_FOLDER:
-        output_video_root = os.path.join(output_video_root, output_stem)
-    if final_video_archive_folder == FINAL_VIDEO_ARCHIVE_FOLDER:
-        final_video_archive_folder = os.path.join(final_video_archive_folder, output_stem)
-
-    run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
-    run_archive_dir = (
-        os.path.join(final_video_archive_folder, "runs", run_stamp)
-        if final_video_archive_folder
-        else None
-    )
-    if run_archive_dir:
-        os.makedirs(run_archive_dir, exist_ok=True)
-
-    session_video_folder = build_session_video_folder(
-        output_video_root,
-        session_label=session_label,
-        resume_session=resume_session,
-    )
-    final_video_name = build_named_final_video_path(final_video_name, song_title, song_artist)
-    final_video_name = build_timestamped_final_video_name(final_video_name)
-    final_video_dir = os.path.dirname(final_video_name)
-    if not final_video_dir and run_archive_dir:
-        final_video_dir = run_archive_dir
-        final_video_name = os.path.join(final_video_dir, os.path.basename(final_video_name))
-    videos_manifest_path = os.path.join(session_video_folder, "videos.txt")
-
-    if resume_session:
-        print("Resuming session folder:", session_video_folder)
-    else:
-        print("Session video folder:", session_video_folder)
-
-    audio_files = load_cached_audio_segments(
-        output_audio_folder,
-        input_mp3_hash,
-        segment_length_seconds,
-    )
-    if not audio_files:
-        audio_files = split_audio(input_mp3, output_audio_folder, segment_length_seconds)
-        write_segments_manifest(
-            output_audio_folder,
-            input_mp3,
-            input_mp3_hash,
-            segment_length_seconds,
-            audio_files,
+        input_mp3_hash = hash_file(input_mp3)
+        output_stem = build_output_stem(
+            song_title,
+            song_artist,
+            os.path.splitext(os.path.basename(input_mp3))[0],
         )
-    segment_count = len(audio_files)
+        if audio_cache_root:
+            output_audio_folder = os.path.join(audio_cache_root, output_stem, input_mp3_hash)
+        else:
+            output_audio_folder = os.path.join(output_audio_folder, output_stem, input_mp3_hash)
 
-    if lyrics_text is None:
-        lyrics_text = load_lyrics_text(lyrics_file)
+        # Keep local runs organized by title. API server passes per-job output roots and won't hit this.
+        if output_video_root == OUTPUT_VIDEO_FOLDER:
+            output_video_root = os.path.join(output_video_root, output_stem)
+        if final_video_archive_folder == FINAL_VIDEO_ARCHIVE_FOLDER:
+            final_video_archive_folder = os.path.join(final_video_archive_folder, output_stem)
 
-    # MASTER_PROMPT is the locked style template. Segment prompts are derived from lyrics and written
-    # to disk so a full run can be stitched without touching Hedra again.
-    master_prompt_text = (
-        validate_prompt_text(prompt_override) if prompt_override else load_prompt_text(prompt_file)
-    )
-    segment_durations_ms = [dur for _, dur in audio_files]
-    segments_override = build_segment_infos_from_durations_ms(segment_durations_ms)
-    prompt_assets_dir = os.path.join(session_video_folder, "creative")
-    segment_prompt_template = (
-        "SEGMENT: {segment_number:03d} ({timestamp})\n"
-        "Script / lyrics (do not render as on-screen text):\n"
-        "{script}\n\n"
-        "Direction:\n"
-        "- Follow MASTER_PROMPT for style, identity, camera, lighting, and framing.\n"
-        "- Continuity: first frame continues from previous segment; no reset.\n"
-        "- No on-screen text, subtitles, captions, logos, watermarks, or gibberish artifacts.\n"
-        "- Escalation: intensity {intensity:.2f} (0..1) guides subtle evolution only when supported by the audio.\n"
-    )
-    generic_config = GenericVideoPipelineConfig(
-        segment_duration_seconds=float(segment_length_seconds),
-        narrative_mode="music_video",
-        script_max_lines_per_segment=max(1, int(lyrics_max_lines_per_segment)),
-        segment_prompt_template=segment_prompt_template,
-        export_prompt_bundle=True,
-    )
-    generic_engine = StaticMasterPromptEngine(generic_config, master_prompt_text)
-    generic_outputs = build_generic_prompt_package(
-        GenericPipelineInputs(
-            media_path=input_mp3,
-            script_text=lyrics_text or "",
-            metadata={
-                "song_title": song_title or "",
-                "song_artist": song_artist or "",
-            },
-        ),
-        config=generic_config,
-        engine=generic_engine,
-        run_dir=prompt_assets_dir,
-        segments_override=segments_override,
-        media_duration_ms_override=sum(segment_durations_ms),
-        media_sha256_override=input_mp3_hash,
-    )
-
-    generic_segments_payload = load_json_file(generic_outputs.segments_path) or {}
-    segment_prompt_rows = list(generic_segments_payload.get("segments", []) or [])
-    segment_prompt_texts = [row.get("segmentPrompt", "").strip() for row in segment_prompt_rows]
-    lyrics_by_segment = [row.get("scriptLines", "") for row in segment_prompt_rows]
-
-    write_text_file(os.path.join(session_video_folder, "master_prompt.txt"), master_prompt_text)
-    write_text_file(os.path.join(session_video_folder, "lyrics.txt"), lyrics_text or "")
-    timestamps_payload = load_json_file(generic_outputs.timestamps_path) or []
-    timestamp_map = [
-        {
-            "segment": entry.get("segment"),
-            "start": entry.get("start"),
-            "end": entry.get("end"),
-            "timestamp": entry.get("timestamp"),
-        }
-        for entry in timestamps_payload
-    ]
-    write_json_file(os.path.join(session_video_folder, "timestamp_map.json"), timestamp_map)
-    write_json_file(
-        os.path.join(session_video_folder, "segments_prompts.json"),
-        {
-            "MASTER_PROMPT": master_prompt_text.strip(),
-            "segment_length_seconds": float(segment_length_seconds),
-            "segment_count": int(segment_count),
-            "segments": [
-                {
-                    "segmentNumber": row.get("segmentNumber"),
-                    "timestamp": row.get("timestamp"),
-                    "lyricsLines": row.get("scriptLines", ""),
-                    "scenePrompt": row.get("segmentPrompt", ""),
-                }
-                for row in segment_prompt_rows
-            ],
-        },
-    )
-    creative_assets = {
-        "prompt_assets_dir": os.path.abspath(prompt_assets_dir),
-        "segments_json": os.path.abspath(generic_outputs.segments_path),
-        "timestamps_json": os.path.abspath(generic_outputs.timestamps_path),
-        "prompt_bundle_json": os.path.abspath(generic_outputs.prompt_bundle_path)
-        if generic_outputs.prompt_bundle_path
-        else None,
-    }
-
-    if not resume_session and not session_label:
-        latest_session_folder = get_latest_session_folder(output_video_root)
-        if latest_session_folder and has_all_video_segments(latest_session_folder, segment_count):
-            if os.path.normpath(latest_session_folder) != os.path.normpath(session_video_folder):
-                print(
-                    "Latest session already has all segments. "
-                    "Starting a new session folder:", session_video_folder
-                )
-
-    if has_all_video_segments(session_video_folder, segment_count):
-        print(
-            "All segments already exist in this session. "
-            "Skipping Hedra and stitching immediately."
-        )
-        existing_manifest = read_run_manifest(session_video_folder)
-        existing_fingerprint = existing_manifest.get("fingerprint", {}) if existing_manifest else {}
-        existing_lip_sync = bool(existing_fingerprint.get("lip_sync_required", True))
-        expected_videos = get_expected_video_paths(session_video_folder, segment_count)
-        stitch_video(
-            expected_videos,
-            videos_manifest_path,
-            final_video_name,
-            audio_track_path=input_mp3 if not existing_lip_sync else None,
+        run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+        run_archive_dir = (
+            os.path.join(final_video_archive_folder, "runs", run_stamp)
+            if final_video_archive_folder
+            else None
         )
         if run_archive_dir:
-            archive_run_inputs(run_archive_dir, input_mp3, reference_images)
-            archive_run_outputs(run_archive_dir, final_video_name)
-        versioned_copy_path = save_versioned_video_copy(
-            final_video_name,
-            input_mp3,
-            final_video_archive_folder,
+            os.makedirs(run_archive_dir, exist_ok=True)
+
+        session_video_folder = build_session_video_folder(
+            output_video_root,
+            session_label=session_label,
+            resume_session=resume_session,
+        )
+        final_video_name = build_named_final_video_path(final_video_name, song_title, song_artist)
+        final_video_name = build_timestamped_final_video_name(final_video_name)
+        final_video_dir = os.path.dirname(final_video_name)
+        if not final_video_dir and run_archive_dir:
+            final_video_dir = run_archive_dir
+            final_video_name = os.path.join(final_video_dir, os.path.basename(final_video_name))
+        videos_manifest_path = os.path.join(session_video_folder, "videos.txt")
+
+        if resume_session:
+            print("Resuming session folder:", session_video_folder)
+        else:
+            print("Session video folder:", session_video_folder)
+
+        audio_files = load_cached_audio_segments(
+            output_audio_folder,
+            input_mp3_hash,
+            segment_length_seconds,
+        )
+        reused_cached_audio = bool(audio_files)
+        if not audio_files:
+            audio_files = split_audio(input_mp3, output_audio_folder, segment_length_seconds)
+            write_segments_manifest(
+                output_audio_folder,
+                input_mp3,
+                input_mp3_hash,
+                segment_length_seconds,
+                audio_files,
+            )
+        segment_count = len(audio_files)
+
+        if lyrics_text is None:
+            lyrics_text = load_lyrics_text(lyrics_file)
+
+        # MASTER_PROMPT is the locked style template. Segment prompts are derived from lyrics and written
+        # to disk so a full run can be stitched without touching Hedra again.
+        master_prompt_text = (
+            validate_prompt_text(prompt_override) if prompt_override else load_prompt_text(prompt_file)
+        )
+        segment_durations_ms = [dur for _, dur in audio_files]
+        segments_override = build_segment_infos_from_durations_ms(segment_durations_ms)
+        segment_prompt_template = (
+            "SEGMENT: {segment_number:03d} ({timestamp})\n"
+            "Script / lyrics (do not render as on-screen text):\n"
+            "{script}\n\n"
+            "Direction:\n"
+            "- Follow MASTER_PROMPT for style, identity, camera, lighting, and framing.\n"
+            "- Continuity: first frame continues from previous segment; no reset.\n"
+            "- No on-screen text, subtitles, captions, logos, watermarks, or gibberish artifacts.\n"
+            "- Escalation: intensity {intensity:.2f} (0..1) guides subtle evolution only when supported by the audio.\n"
+        )
+        prompt_assets = build_or_load_prompt_assets(
+            prompt_cache_root=PROMPT_CACHE_ROOT,
+            output_stem=output_stem,
+            master_prompt_text=master_prompt_text,
+            lyrics_text=lyrics_text or "",
+            segment_length_seconds=segment_length_seconds,
+            segment_durations_ms=segment_durations_ms,
             song_title=song_title,
             song_artist=song_artist,
+            input_mp3_hash=input_mp3_hash,
+            segment_prompt_template=segment_prompt_template,
+            lyrics_max_lines_per_segment=lyrics_max_lines_per_segment,
+            segments_override=segments_override,
         )
-        print("\nDONE. Final video created:", final_video_name)
-        print("Versioned archive copy:", versioned_copy_path)
-        return {
-            "final_video": os.path.abspath(final_video_name),
-            "versioned_final_video": os.path.abspath(versioned_copy_path),
-            "session_video_folder": os.path.abspath(session_video_folder),
-            "videos_manifest": os.path.abspath(videos_manifest_path),
-            "video_segments": [os.path.abspath(path) for path in expected_videos],
-            "reused_cached_audio": reused_cached_audio,
-            "reused_image_asset": False,
-            "creative_assets": creative_assets,
+        prompt_assets_dir = sync_prompt_assets_to_session(session_video_folder, prompt_assets)
+
+        generic_segments_payload = (
+            load_json_file(os.path.join(prompt_assets_dir, "segments.json")) or {}
+        )
+        segment_prompt_rows = list(generic_segments_payload.get("segments", []) or [])
+        segment_prompt_texts = [row.get("segmentPrompt", "").strip() for row in segment_prompt_rows]
+        lyrics_by_segment = [row.get("scriptLines", "") for row in segment_prompt_rows]
+
+        write_text_file(os.path.join(session_video_folder, "master_prompt.txt"), master_prompt_text)
+        write_text_file(os.path.join(session_video_folder, "lyrics.txt"), lyrics_text or "")
+        timestamps_payload = (
+            load_json_file(os.path.join(prompt_assets_dir, "timestamps.json")) or []
+        )
+        timestamp_map = [
+            {
+                "segment": entry.get("segment"),
+                "start": entry.get("start"),
+                "end": entry.get("end"),
+                "timestamp": entry.get("timestamp"),
+            }
+            for entry in timestamps_payload
+        ]
+        write_json_file(os.path.join(session_video_folder, "timestamp_map.json"), timestamp_map)
+        write_json_file(
+            os.path.join(session_video_folder, "segments_prompts.json"),
+            {
+                "MASTER_PROMPT": master_prompt_text.strip(),
+                "segment_length_seconds": float(segment_length_seconds),
+                "segment_count": int(segment_count),
+                "segments": [
+                    {
+                        "segmentNumber": row.get("segmentNumber"),
+                        "timestamp": row.get("timestamp"),
+                        "lyricsLines": row.get("scriptLines", ""),
+                        "scenePrompt": row.get("segmentPrompt", ""),
+                    }
+                    for row in segment_prompt_rows
+                ],
+            },
+        )
+        creative_assets = {
+            "prompt_assets_dir": os.path.abspath(prompt_assets_dir),
+            "segments_json": os.path.abspath(os.path.join(prompt_assets_dir, "segments.json")),
+            "timestamps_json": os.path.abspath(os.path.join(prompt_assets_dir, "timestamps.json")),
+            "prompt_bundle_json": (
+                os.path.abspath(os.path.join(prompt_assets_dir, "prompt_bundle.json"))
+                if os.path.exists(os.path.join(prompt_assets_dir, "prompt_bundle.json"))
+                else None
+            ),
         }
 
-    effective_model_name = (model_name or "").strip()
-    if not effective_model_name:
-        effective_model_name = (
-            default_lipsync_model_name if lip_sync_required else default_non_lipsync_model_name
-        )
-
-    prompt_text = master_prompt_text
-    models = fetch_models()
-    try:
-        model = resolve_model(
-            effective_model_name,
-            require_audio_input=lip_sync_required,
-            models=models,
-        )
-    except ValueError as exc:
-        message = str(exc)
-        if "not found. Available models:" not in message:
-            raise
-        fallback = pick_fallback_model(models, require_audio_input=lip_sync_required)
-        if not fallback:
-            raise
-        print("Requested model not found:", effective_model_name)
-        print("Falling back to model:", fallback.get("name"))
-        effective_model_name = str(fallback.get("name", effective_model_name))
-        model = fallback
-    model_id = model["id"]
-    model_requires_audio = bool(model.get("requires_audio_input"))
-    print("Using prompt file:", prompt_file)
-    print("Using model:", effective_model_name, model_id)
-    print("Lip sync required:", bool(lip_sync_required))
-
-    reference_image_hashes = [hash_file(path) for path in reference_images]
-    reference_image_hashes_sorted = sorted(reference_image_hashes)
-    fingerprint = {
-        "input_mp3_hash": input_mp3_hash,
-        "reference_image_hashes": reference_image_hashes_sorted,
-        "prompt_hash": sha256_text(prompt_text),
-        "segment_length_seconds": segment_length_seconds,
-        "segment_count": segment_count,
-        "model_id": model_id,
-        "model_name": effective_model_name,
-        "lip_sync_required": bool(lip_sync_required),
-        "generated_video_inputs": {
-            "aspect_ratio": "9:16",
-            "resolution": "720p",
-            "enhance_prompt": False,
-        },
-    }
-    write_run_manifest(
-        session_video_folder,
-        {
-            "created_at": datetime.now().isoformat(),
-            "fingerprint": fingerprint,
-        },
-    )
-    if any((row or "").strip() for row in lyrics_by_segment):
-        save_lyrics_segments(session_video_folder, segment_length_seconds, lyrics_by_segment)
-
-    if not resume_session:
-        reused_segments = reuse_complete_session_segments(
-            output_video_root,
-            session_video_folder,
-            fingerprint,
-            segment_count,
-        )
-        if reused_segments and has_all_video_segments(session_video_folder, segment_count):
-            print("Segments reused. Stitching without contacting Hedra...")
+        if not resume_session and not session_label:
+            latest_session_folder = get_latest_session_folder(output_video_root)
+            if latest_session_folder and has_all_video_segments(latest_session_folder, segment_count):
+                if os.path.normpath(latest_session_folder) != os.path.normpath(session_video_folder):
+                    print(
+                        "Latest session already has all segments. "
+                        "Starting a new session folder:", session_video_folder
+                    )
+    
+        if has_all_video_segments(session_video_folder, segment_count):
+            print(
+                "All segments already exist in this session. "
+                "Skipping Hedra and stitching immediately."
+            )
+            existing_manifest = read_run_manifest(session_video_folder)
+            existing_fingerprint = existing_manifest.get("fingerprint", {}) if existing_manifest else {}
+            existing_lip_sync = bool(existing_fingerprint.get("lip_sync_required", True))
             expected_videos = get_expected_video_paths(session_video_folder, segment_count)
             stitch_video(
                 expected_videos,
                 videos_manifest_path,
                 final_video_name,
-                audio_track_path=input_mp3 if not model_requires_audio else None,
+                audio_track_path=input_mp3 if not existing_lip_sync else None,
             )
             if run_archive_dir:
                 archive_run_inputs(run_archive_dir, input_mp3, reference_images)
@@ -1611,6 +1372,7 @@ def run_pipeline(
             )
             print("\nDONE. Final video created:", final_video_name)
             print("Versioned archive copy:", versioned_copy_path)
+            completed_successfully = True
             return {
                 "final_video": os.path.abspath(final_video_name),
                 "versioned_final_video": os.path.abspath(versioned_copy_path),
@@ -1621,293 +1383,395 @@ def run_pipeline(
                 "reused_image_asset": False,
                 "creative_assets": creative_assets,
             }
-
-    asset_cache = load_asset_cache(image_asset_cache_path) if image_asset_cache_path else None
-    asset_cache_dirty = False
-
-    image_asset_ids = []
-    reused_image_asset = False
-    for idx, (image_path, image_hash) in enumerate(zip(reference_images, reference_image_hashes)):
-        image_asset_id = None
-        if reuse_image_asset and asset_cache and not force_image_upload:
-            cached_entry = asset_cache.get("images", {}).get(image_hash)
-            if cached_entry and cached_entry.get("asset_id"):
-                image_asset_id = cached_entry["asset_id"]
-                reused_image_asset = True
-                print("Reusing cached image asset id:", image_asset_id)
-
-        if not image_asset_id:
-            print("Uploading reference image:", os.path.basename(image_path))
-            image_asset_id = upload_asset(
-                image_path,
-                name=os.path.basename(image_path),
-                mime="image/png",
-                type_="image",
+    
+        effective_model_name = (model_name or "").strip()
+        if not effective_model_name:
+            effective_model_name = (
+                default_lipsync_model_name if lip_sync_required else default_non_lipsync_model_name
             )
-            print("Reference image asset id:", image_asset_id)
-            if reuse_image_asset and asset_cache and not force_image_upload:
-                asset_cache["images"][image_hash] = {
-                    "asset_id": image_asset_id,
-                    "filename": os.path.basename(image_path),
-                    "updated_at": datetime.now().isoformat(),
+    
+        prompt_text = master_prompt_text
+        models = fetch_models()
+        try:
+            model = resolve_model(
+                effective_model_name,
+                require_audio_input=lip_sync_required,
+                models=models,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if "not found. Available models:" not in message:
+                raise
+            fallback = pick_fallback_model(models, require_audio_input=lip_sync_required)
+            if not fallback:
+                raise
+            print("Requested model not found:", effective_model_name)
+            print("Falling back to model:", fallback.get("name"))
+            effective_model_name = str(fallback.get("name", effective_model_name))
+            model = fallback
+        model_id = model["id"]
+        model_requires_audio = bool(model.get("requires_audio_input"))
+        print("Using prompt file:", prompt_file)
+        print("Using model:", effective_model_name, model_id)
+        print("Lip sync required:", bool(lip_sync_required))
+    
+        reference_image_hashes = [hash_file(path) for path in reference_images]
+        reference_image_hashes_sorted = sorted(reference_image_hashes)
+        fingerprint = {
+            "input_mp3_hash": input_mp3_hash,
+            "reference_image_hashes": reference_image_hashes_sorted,
+            "prompt_hash": sha256_text(prompt_text),
+            "segment_length_seconds": segment_length_seconds,
+            "segment_count": segment_count,
+            "model_id": model_id,
+            "model_name": effective_model_name,
+            "lip_sync_required": bool(lip_sync_required),
+            "generated_video_inputs": {
+                "aspect_ratio": "9:16",
+                "resolution": "720p",
+                "enhance_prompt": False,
+            },
+        }
+        write_run_manifest(
+            session_video_folder,
+            {
+                "created_at": datetime.now().isoformat(),
+                "fingerprint": fingerprint,
+            },
+        )
+        if any((row or "").strip() for row in lyrics_by_segment):
+            save_lyrics_segments(session_video_folder, segment_length_seconds, lyrics_by_segment)
+    
+        if not resume_session:
+            reused_segments = reuse_complete_session_segments(
+                output_video_root,
+                session_video_folder,
+                fingerprint,
+                segment_count,
+            )
+            if reused_segments and has_all_video_segments(session_video_folder, segment_count):
+                print("Segments reused. Stitching without contacting Hedra...")
+                expected_videos = get_expected_video_paths(session_video_folder, segment_count)
+                stitch_video(
+                    expected_videos,
+                    videos_manifest_path,
+                    final_video_name,
+                    audio_track_path=input_mp3 if not model_requires_audio else None,
+                )
+                if run_archive_dir:
+                    archive_run_inputs(run_archive_dir, input_mp3, reference_images)
+                    archive_run_outputs(run_archive_dir, final_video_name)
+                versioned_copy_path = save_versioned_video_copy(
+                    final_video_name,
+                    input_mp3,
+                    final_video_archive_folder,
+                    song_title=song_title,
+                    song_artist=song_artist,
+                )
+                print("\nDONE. Final video created:", final_video_name)
+                print("Versioned archive copy:", versioned_copy_path)
+                completed_successfully = True
+                return {
+                    "final_video": os.path.abspath(final_video_name),
+                    "versioned_final_video": os.path.abspath(versioned_copy_path),
+                    "session_video_folder": os.path.abspath(session_video_folder),
+                    "videos_manifest": os.path.abspath(videos_manifest_path),
+                    "video_segments": [os.path.abspath(path) for path in expected_videos],
+                    "reused_cached_audio": reused_cached_audio,
+                    "reused_image_asset": False,
+                    "creative_assets": creative_assets,
                 }
-                asset_cache_dirty = True
-
-        image_asset_ids.append(image_asset_id)
-
-    video_files = []
-    current_start_keyframe_id = image_asset_ids[0]
-    segment_jobs = load_segment_jobs(session_video_folder)
-
-    for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
-        print(f"\nProcessing segment {idx + 1}/{len(audio_files)}")
-        video_path = os.path.join(session_video_folder, f"video_{idx:03}.mp4")
-
-        if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
-            print("Skipping existing video segment:", video_path)
-            video_files.append(video_path)
-            if idx < len(audio_files) - 1:
-                current_start_keyframe_id = upload_continuity_frame(
-                    video_path,
-                    idx,
-                    session_video_folder,
+    
+        asset_cache = load_asset_cache(image_asset_cache_path) if image_asset_cache_path else None
+        asset_cache_dirty = False
+    
+        image_asset_ids = []
+        reused_image_asset = False
+        for idx, (image_path, image_hash) in enumerate(zip(reference_images, reference_image_hashes)):
+            image_asset_id = None
+            if reuse_image_asset and asset_cache and not force_image_upload:
+                cached_entry = asset_cache.get("images", {}).get(image_hash)
+                if cached_entry and cached_entry.get("asset_id"):
+                    image_asset_id = cached_entry["asset_id"]
+                    reused_image_asset = True
+                    print("Reusing cached image asset id:", image_asset_id)
+    
+            if not image_asset_id:
+                print("Uploading reference image:", os.path.basename(image_path))
+                image_asset_id = upload_asset(
+                    image_path,
+                    name=os.path.basename(image_path),
+                    mime="image/png",
+                    type_="image",
                 )
-            continue
-
-        segment_key = f"{idx:03}"
-        job_entry = segment_jobs.get(segment_key)
-        if job_entry and job_entry.get("job_id"):
-            print("Found existing job for segment", segment_key, "- checking status...")
-            status_url = f"{API_BASE}/generations/{job_entry['job_id']}/status"
-            try:
-                status_json = poll_generation_status(status_url)
-                output = status_json.get("output", {})
-                video_url = (
-                    output.get("video_url")
-                    or status_json.get("download_url")
-                    or status_json.get("url")
-                    or status_json.get("streaming_url")
-                )
-                if not video_url:
-                    raise RuntimeError("No video_url returned for existing job")
-
-                print("Downloading video for existing job...")
-                download_video_file(video_url, video_path)
+                print("Reference image asset id:", image_asset_id)
+                if reuse_image_asset and asset_cache and not force_image_upload:
+                    asset_cache["images"][image_hash] = {
+                        "asset_id": image_asset_id,
+                        "filename": os.path.basename(image_path),
+                        "updated_at": datetime.now().isoformat(),
+                    }
+                    asset_cache_dirty = True
+    
+            image_asset_ids.append(image_asset_id)
+    
+        video_files = []
+        current_start_keyframe_id = image_asset_ids[0]
+        segment_jobs = load_segment_jobs(session_video_folder)
+    
+        for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
+            print(f"\nProcessing segment {idx + 1}/{len(audio_files)}")
+            video_path = os.path.join(session_video_folder, f"video_{idx:03}.mp4")
+    
+            if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+                print("Skipping existing video segment:", video_path)
                 video_files.append(video_path)
-                print("Saved:", video_path)
-
-                segment_jobs[segment_key]["status"] = "complete"
-                segment_jobs[segment_key]["video_path"] = video_path
-                save_segment_jobs(session_video_folder, segment_jobs)
-
                 if idx < len(audio_files) - 1:
                     current_start_keyframe_id = upload_continuity_frame(
                         video_path,
                         idx,
                         session_video_folder,
                     )
-                if request_delay_seconds > 0:
-                    print(f"Waiting {request_delay_seconds} seconds (rate limit buffer)...")
-                    time.sleep(request_delay_seconds)
                 continue
-            except Exception as exc:
-                print("Existing job could not be used, will create a new one:", exc)
-                segment_jobs.pop(segment_key, None)
-                save_segment_jobs(session_video_folder, segment_jobs)
-
-        audio_asset_id = None
-        audio_hash = None
-        reused_audio_asset = False
-        if model_requires_audio:
-            if reuse_audio_asset and asset_cache and not force_audio_upload:
-                audio_hash = hash_file(audio_file)
-                cached_audio = asset_cache.get("audio", {}).get(audio_hash)
-                if cached_audio and cached_audio.get("asset_id"):
-                    audio_asset_id = cached_audio["asset_id"]
-                    reused_audio_asset = True
-                    print("Reusing cached audio asset id:", audio_asset_id)
-
-            if not audio_asset_id:
-                print("Uploading audio segment:", audio_file)
-                audio_asset_id = upload_asset(
-                    audio_file,
-                    name=os.path.basename(audio_file),
-                    mime="audio/mpeg",
-                    type_="audio",
-                )
-                print("Audio asset id:", audio_asset_id)
-                if reuse_audio_asset and asset_cache and not force_audio_upload:
-                    if audio_hash is None:
-                        audio_hash = hash_file(audio_file)
-                    asset_cache["audio"][audio_hash] = {
-                        "asset_id": audio_asset_id,
-                        "filename": os.path.basename(audio_file),
-                        "updated_at": datetime.now().isoformat(),
-                    }
-                    asset_cache_dirty = True
-        else:
-            print("Model does not require audio; skipping audio upload.")
-
-        include_reference_images = (idx == 0 and len(image_asset_ids) > 1)
-
-        segment_prompt = (
-            segment_prompt_texts[idx] if idx < len(segment_prompt_texts) else prompt_text
-        )
-        segment_prompt = validate_prompt_text(segment_prompt)
-
-        generation_payload = {
-            "type": "video",
-            "ai_model_id": model_id,
-            "generated_video_inputs": {
-                "text_prompt": segment_prompt,
-                "duration_ms": audio_duration_ms,
-                "aspect_ratio": "9:16",
-                "resolution": "720p",
-                "enhance_prompt": False,
-            },
-        }
-        if include_reference_images:
-            generation_payload["reference_image_ids"] = image_asset_ids
-        else:
-            generation_payload["start_keyframe_id"] = current_start_keyframe_id
-        if audio_asset_id:
-            generation_payload["audio_id"] = audio_asset_id
-
-        print("Starting generation...")
-        gen_url = f"{API_BASE}/generations"
-        resp = http_session().post(
-            gen_url,
-            headers=get_headers("application/json"),
-            json=generation_payload,
-            timeout=60,
-        )
-
-        if include_reference_images and resp.status_code == 422:
-            try:
-                body = resp.json()
-                messages = " ".join(body.get("messages", []))
-            except Exception:
-                messages = resp.text
-            if "reference_image_ids" in messages and ("start/end keyframe" in messages or "start keyframe" in messages):
-                print("Multiple reference images rejected with keyframe rules; retrying without reference_image_ids.")
-                generation_payload.pop("reference_image_ids", None)
-                generation_payload["start_keyframe_id"] = current_start_keyframe_id
-                resp = http_session().post(
-                    gen_url,
-                    headers=get_headers("application/json"),
-                    json=generation_payload,
-                    timeout=60,
-                )
-
-        if not resp.ok:
-            if resp.status_code == 402:
+    
+            segment_key = f"{idx:03}"
+            job_entry = segment_jobs.get(segment_key)
+            if job_entry and job_entry.get("job_id"):
+                print("Found existing job for segment", segment_key, "- checking status...")
+                status_url = f"{API_BASE}/generations/{job_entry['job_id']}/status"
                 try:
-                    error_body = resp.json()
-                    error_messages = error_body.get("messages", [])
-                    error_message = "; ".join(error_messages) if error_messages else resp.text
-                except Exception:
-                    error_message = resp.text
-
-                print(f"Stopping generation because Hedra returned 402: {error_message}")
-                break
-            raise_with_body(resp)
-
-        generation_data = resp.json()
-        job_id = generation_data.get("id") or generation_data.get("generation_id")
-
-        if not job_id:
-            raise Exception(f"No job_id returned: {generation_data}")
-
-        print("Generation started. Job ID:", job_id)
-        segment_jobs[segment_key] = {
-            "job_id": job_id,
-            "audio_file": os.path.abspath(audio_file),
-            "audio_asset_id": audio_asset_id,
-            "duration_ms": audio_duration_ms,
-            "model_id": model_id,
-            "requires_audio_input": model_requires_audio,
-            "created_at": datetime.now().isoformat(),
-            "status": "submitted",
-        }
-        save_segment_jobs(session_video_folder, segment_jobs)
-
-        status_url = f"{API_BASE}/generations/{job_id}/status"
-
-        status_json = poll_generation_status(status_url)
-
-        output = status_json.get("output", {})
-        video_url = (
-            output.get("video_url")
-            or status_json.get("download_url")
-            or status_json.get("url")
-            or status_json.get("streaming_url")
-        )
-
-        if not video_url:
-            raise Exception("No video_url returned")
-
-        print("Downloading video...")
-        download_video_file(video_url, video_path)
-
-        video_files.append(video_path)
-        print("Saved:", video_path)
-        segment_jobs[segment_key]["status"] = "complete"
-        segment_jobs[segment_key]["video_path"] = video_path
-        save_segment_jobs(session_video_folder, segment_jobs)
-
-        if idx < len(audio_files) - 1:
-            current_start_keyframe_id = upload_continuity_frame(
-                video_path,
-                idx,
-                session_video_folder,
+                    status_json = poll_generation_status(status_url)
+                    output = status_json.get("output", {})
+                    video_url = (
+                        output.get("video_url")
+                        or status_json.get("download_url")
+                        or status_json.get("url")
+                        or status_json.get("streaming_url")
+                    )
+                    if not video_url:
+                        raise RuntimeError("No video_url returned for existing job")
+    
+                    print("Downloading video for existing job...")
+                    download_video_file(video_url, video_path)
+                    video_files.append(video_path)
+                    print("Saved:", video_path)
+    
+                    segment_jobs[segment_key]["status"] = "complete"
+                    segment_jobs[segment_key]["video_path"] = video_path
+                    save_segment_jobs(session_video_folder, segment_jobs)
+    
+                    if idx < len(audio_files) - 1:
+                        current_start_keyframe_id = upload_continuity_frame(
+                            video_path,
+                            idx,
+                            session_video_folder,
+                        )
+                    if request_delay_seconds > 0:
+                        print(f"Waiting {request_delay_seconds} seconds (rate limit buffer)...")
+                        time.sleep(request_delay_seconds)
+                    continue
+                except Exception as exc:
+                    print("Existing job could not be used, will create a new one:", exc)
+                    segment_jobs.pop(segment_key, None)
+                    save_segment_jobs(session_video_folder, segment_jobs)
+    
+            audio_asset_id = None
+            audio_hash = None
+            reused_audio_asset = False
+            if model_requires_audio:
+                if reuse_audio_asset and asset_cache and not force_audio_upload:
+                    audio_hash = hash_file(audio_file)
+                    cached_audio = asset_cache.get("audio", {}).get(audio_hash)
+                    if cached_audio and cached_audio.get("asset_id"):
+                        audio_asset_id = cached_audio["asset_id"]
+                        reused_audio_asset = True
+                        print("Reusing cached audio asset id:", audio_asset_id)
+    
+                if not audio_asset_id:
+                    print("Uploading audio segment:", audio_file)
+                    audio_asset_id = upload_asset(
+                        audio_file,
+                        name=os.path.basename(audio_file),
+                        mime="audio/mpeg",
+                        type_="audio",
+                    )
+                    print("Audio asset id:", audio_asset_id)
+                    if reuse_audio_asset and asset_cache and not force_audio_upload:
+                        if audio_hash is None:
+                            audio_hash = hash_file(audio_file)
+                        asset_cache["audio"][audio_hash] = {
+                            "asset_id": audio_asset_id,
+                            "filename": os.path.basename(audio_file),
+                            "updated_at": datetime.now().isoformat(),
+                        }
+                        asset_cache_dirty = True
+            else:
+                print("Model does not require audio; skipping audio upload.")
+    
+            include_reference_images = (idx == 0 and len(image_asset_ids) > 1)
+    
+            segment_prompt = (
+                segment_prompt_texts[idx] if idx < len(segment_prompt_texts) else prompt_text
             )
-
-        if request_delay_seconds > 0:
-            print(f"Waiting {request_delay_seconds} seconds (rate limit buffer)...")
-            time.sleep(request_delay_seconds)
-
-    if asset_cache_dirty and image_asset_cache_path and asset_cache:
-        save_asset_cache(image_asset_cache_path, asset_cache)
-
-    if not video_files:
-        raise RuntimeError("No video segments were generated. Check credits and API errors.")
-
-    if len(video_files) < len(audio_files):
-        print(
-            f"\nStitching partial video from {len(video_files)}/{len(audio_files)} completed segments..."
+            segment_prompt = validate_prompt_text(segment_prompt)
+    
+            generation_payload = {
+                "type": "video",
+                "ai_model_id": model_id,
+                "generated_video_inputs": {
+                    "text_prompt": segment_prompt,
+                    "duration_ms": audio_duration_ms,
+                    "aspect_ratio": "9:16",
+                    "resolution": "720p",
+                    "enhance_prompt": False,
+                },
+            }
+            if include_reference_images:
+                generation_payload["reference_image_ids"] = image_asset_ids
+            else:
+                generation_payload["start_keyframe_id"] = current_start_keyframe_id
+            if audio_asset_id:
+                generation_payload["audio_id"] = audio_asset_id
+    
+            print("Starting generation...")
+            gen_url = f"{API_BASE}/generations"
+            resp = http_session().post(
+                gen_url,
+                headers=get_headers("application/json"),
+                json=generation_payload,
+                timeout=60,
+            )
+    
+            if include_reference_images and resp.status_code == 422:
+                try:
+                    body = resp.json()
+                    messages = " ".join(body.get("messages", []))
+                except Exception:
+                    messages = resp.text
+                if "reference_image_ids" in messages and ("start/end keyframe" in messages or "start keyframe" in messages):
+                    print("Multiple reference images rejected with keyframe rules; retrying without reference_image_ids.")
+                    generation_payload.pop("reference_image_ids", None)
+                    generation_payload["start_keyframe_id"] = current_start_keyframe_id
+                    resp = http_session().post(
+                        gen_url,
+                        headers=get_headers("application/json"),
+                        json=generation_payload,
+                        timeout=60,
+                    )
+    
+            if not resp.ok:
+                if resp.status_code == 402:
+                    try:
+                        error_body = resp.json()
+                        error_messages = error_body.get("messages", [])
+                        error_message = "; ".join(error_messages) if error_messages else resp.text
+                    except Exception:
+                        error_message = resp.text
+    
+                    print(f"Stopping generation because Hedra returned 402: {error_message}")
+                    break
+                raise_with_body(resp)
+    
+            generation_data = resp.json()
+            job_id = generation_data.get("id") or generation_data.get("generation_id")
+    
+            if not job_id:
+                raise Exception(f"No job_id returned: {generation_data}")
+    
+            print("Generation started. Job ID:", job_id)
+            segment_jobs[segment_key] = {
+                "job_id": job_id,
+                "audio_file": os.path.abspath(audio_file),
+                "audio_asset_id": audio_asset_id,
+                "duration_ms": audio_duration_ms,
+                "model_id": model_id,
+                "requires_audio_input": model_requires_audio,
+                "created_at": datetime.now().isoformat(),
+                "status": "submitted",
+            }
+            save_segment_jobs(session_video_folder, segment_jobs)
+    
+            status_url = f"{API_BASE}/generations/{job_id}/status"
+    
+            status_json = poll_generation_status(status_url)
+    
+            output = status_json.get("output", {})
+            video_url = (
+                output.get("video_url")
+                or status_json.get("download_url")
+                or status_json.get("url")
+                or status_json.get("streaming_url")
+            )
+    
+            if not video_url:
+                raise Exception("No video_url returned")
+    
+            print("Downloading video...")
+            download_video_file(video_url, video_path)
+    
+            video_files.append(video_path)
+            print("Saved:", video_path)
+            segment_jobs[segment_key]["status"] = "complete"
+            segment_jobs[segment_key]["video_path"] = video_path
+            save_segment_jobs(session_video_folder, segment_jobs)
+    
+            if idx < len(audio_files) - 1:
+                current_start_keyframe_id = upload_continuity_frame(
+                    video_path,
+                    idx,
+                    session_video_folder,
+                )
+    
+            if request_delay_seconds > 0:
+                print(f"Waiting {request_delay_seconds} seconds (rate limit buffer)...")
+                time.sleep(request_delay_seconds)
+    
+        if asset_cache_dirty and image_asset_cache_path and asset_cache:
+            save_asset_cache(image_asset_cache_path, asset_cache)
+    
+        if not video_files:
+            raise RuntimeError("No video segments were generated. Check credits and API errors.")
+    
+        if len(video_files) < len(audio_files):
+            print(
+                f"\nStitching partial video from {len(video_files)}/{len(audio_files)} completed segments..."
+            )
+        else:
+            print("\nStitching final video...")
+    
+        stitch_video(
+            video_files,
+            videos_manifest_path,
+            final_video_name,
+            audio_track_path=input_mp3 if not model_requires_audio else None,
         )
-    else:
-        print("\nStitching final video...")
-
-    stitch_video(
-        video_files,
-        videos_manifest_path,
-        final_video_name,
-        audio_track_path=input_mp3 if not model_requires_audio else None,
-    )
-    if run_archive_dir:
-        archive_run_inputs(run_archive_dir, input_mp3, reference_images)
-        archive_run_outputs(run_archive_dir, final_video_name)
-    versioned_copy_path = save_versioned_video_copy(
-        final_video_name,
-        input_mp3,
-        final_video_archive_folder,
-        song_title=song_title,
-        song_artist=song_artist,
-    )
-
-    print("\nDONE. Final video created:", final_video_name)
-    print("Versioned archive copy:", versioned_copy_path)
-    return {
-        "final_video": os.path.abspath(final_video_name),
-        "versioned_final_video": os.path.abspath(versioned_copy_path),
-        "session_video_folder": os.path.abspath(session_video_folder),
-        "videos_manifest": os.path.abspath(videos_manifest_path),
-        "video_segments": [os.path.abspath(path) for path in video_files],
-        "reused_cached_audio": reused_cached_audio,
-        "reused_image_asset": reused_image_asset,
-        "creative_assets": creative_assets,
-    }
+        if run_archive_dir:
+            archive_run_inputs(run_archive_dir, input_mp3, reference_images)
+            archive_run_outputs(run_archive_dir, final_video_name)
+        versioned_copy_path = save_versioned_video_copy(
+            final_video_name,
+            input_mp3,
+            final_video_archive_folder,
+            song_title=song_title,
+            song_artist=song_artist,
+        )
+    
+        print("\nDONE. Final video created:", final_video_name)
+        print("Versioned archive copy:", versioned_copy_path)
+        completed_successfully = True
+        return {
+            "final_video": os.path.abspath(final_video_name),
+            "versioned_final_video": os.path.abspath(versioned_copy_path),
+            "session_video_folder": os.path.abspath(session_video_folder),
+            "videos_manifest": os.path.abspath(videos_manifest_path),
+            "video_segments": [os.path.abspath(path) for path in video_files],
+            "reused_cached_audio": reused_cached_audio,
+            "reused_image_asset": reused_image_asset,
+            "creative_assets": creative_assets,
+        }
+    finally:
+        if not completed_successfully:
+            _remove_dir_if_empty(run_archive_dir)
 
 
 def main():

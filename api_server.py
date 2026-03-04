@@ -459,6 +459,27 @@ def append_prompt_history(entry):
     save_prompt_history(entries)
 
 
+def _load_json_path(path: str):
+    if not path:
+        return None
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def extract_segment_prompts_from_result(result: dict) -> list[dict]:
+    creative_assets = result.get("creative_assets") or {}
+    segments_path = creative_assets.get("segments_json")
+    payload = _load_json_path(segments_path) if segments_path else None
+    if not isinstance(payload, dict):
+        return []
+    segments = payload.get("segments")
+    if not isinstance(segments, list):
+        return []
+    return segments
+
+
 def build_master_prompt(video_style: str, lip_sync_required: bool) -> str:
     """
     Content-agnostic "master direction" prompt assembled from the selected concept.
@@ -609,6 +630,7 @@ def run_job(
             "lip_sync_required": lip_sync_required,
             "segment_name": segment_name,
             "prompt": prompt_text,
+            "segment_prompts": extract_segment_prompts_from_result(result),
         }
     )
 

@@ -69,6 +69,8 @@ function App() {
   const [modelTouched, setModelTouched] = useState(false)
   const [videoStyles, setVideoStyles] = useState([])
   const [videoStyle, setVideoStyle] = useState('cinematic_studio')
+  const [promptOverride, setPromptOverride] = useState('')
+  const [segmentPromptHistory, setSegmentPromptHistory] = useState(null)
   const [lipSyncRequired, setLipSyncRequired] = useState(true)
   const [defaultLipSyncModelName, setDefaultLipSyncModelName] = useState('')
   const [defaultNonLipSyncModelName, setDefaultNonLipSyncModelName] = useState('')
@@ -280,6 +282,7 @@ function App() {
       formData.append('video_style', videoStyle)
       formData.append('lip_sync_required', lipSyncRequired ? '1' : '0')
       formData.append('segment_name', videoStyle)
+      if (promptOverride.trim()) formData.append('prompt_override', promptOverride.trim())
 
       const resp = await fetch(`${apiBase}/api/jobs`, { method: 'POST', body: formData, headers: { ...authHeaders } })
       const payload = await resp.json()
@@ -478,6 +481,37 @@ function App() {
           </label>
 
           <label className="field-card">
+            <span className="field-label">Master prompt override (optional)</span>
+            <textarea
+              className="lyrics-textarea"
+              placeholder="Paste a master prompt to override the concept preset."
+              rows={6}
+              value={promptOverride}
+              onChange={(e) => setPromptOverride(e.target.value)}
+            />
+            <p className="field-hint">Use prompt history to reapply a previous master prompt.</p>
+          </label>
+
+          {segmentPromptHistory ? (
+            <div className="field-card">
+              <div className="field-label">Segment prompt history (read-only)</div>
+              <textarea
+                className="lyrics-textarea"
+                readOnly
+                rows={8}
+                value={JSON.stringify(segmentPromptHistory, null, 2)}
+              />
+              <button
+                className="launch-button"
+                type="button"
+                onClick={() => navigator.clipboard.writeText(JSON.stringify(segmentPromptHistory, null, 2))}
+              >
+                Copy segment prompts
+              </button>
+            </div>
+          ) : null}
+
+          <label className="field-card">
             <span className="field-label">Lip sync</span>
             <div className="toggle-row">
               <input checked={lipSyncRequired} id="lip-sync" onChange={(e) => setLipSyncRequired(e.target.checked)} type="checkbox" />
@@ -575,12 +609,14 @@ function App() {
                       onClick={() => {
                         if (entry.song_title) setSongTitle(entry.song_title)
                         if (entry.song_artist) setSongArtist(entry.song_artist)
-                        if (entry.segment_name) setSegmentName(entry.segment_name)
+                        if (entry.segment_name || entry.video_style) setVideoStyle(entry.segment_name || entry.video_style)
                         if (entry.model_name) {
                           setModelName(entry.model_name)
                           setModelTouched(true)
                         }
                         if (typeof entry.lip_sync_required === 'boolean') setLipSyncRequired(entry.lip_sync_required)
+                        if (entry.prompt) setPromptOverride(entry.prompt)
+                        if (entry.segment_prompts) setSegmentPromptHistory(entry.segment_prompts)
                       }}
                     >
                       <div className="history-main">
