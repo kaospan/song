@@ -57,9 +57,6 @@ function App() {
   const [promptHistory, setPromptHistory] = useState([])
 
   const [songFile, setSongFile] = useState(null)
-  const [librarySongs, setLibrarySongs] = useState([])
-  const [useLibrarySong, setUseLibrarySong] = useState(false)
-  const [selectedSongId, setSelectedSongId] = useState('')
   const [imageFiles, setImageFiles] = useState([])
   const [lyricsText, setLyricsText] = useState('')
   const [songTitle, setSongTitle] = useState('')
@@ -164,34 +161,6 @@ function App() {
   }, [apiBase])
 
   useEffect(() => {
-    if (!apiBase) return undefined
-    if (authConfig.auth_enabled && !authToken) {
-      setLibrarySongs([])
-      return undefined
-    }
-
-    let cancelled = false
-    ;(async () => {
-      try {
-        const resp = await fetch(`${apiBase}/api/library/songs`, { headers: { ...authHeaders } })
-        const payload = await resp.json()
-        if (!resp.ok) return
-        if (cancelled) return
-
-        const nextSongs = Array.isArray(payload.songs) ? payload.songs : []
-        setLibrarySongs(nextSongs)
-        if (!selectedSongId && nextSongs.length) setSelectedSongId(nextSongs[0].id)
-      } catch {
-        // ignore
-      }
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [apiBase, authConfig.auth_enabled, authToken, authHeaders])
-
-  useEffect(() => {
     if (!defaultLipSyncModelName && !defaultNonLipSyncModelName) return
     const recommended = lipSyncRequired ? defaultLipSyncModelName : defaultNonLipSyncModelName
     if (!modelTouched && recommended) setModelName(recommended)
@@ -293,8 +262,8 @@ function App() {
       setShowAdvanced(true)
       return
     }
-    if ((!useLibrarySong && !songFile) || (useLibrarySong && !selectedSongId) || !imageFiles.length) {
-      setError('Choose an audio source (upload or library) and at least one reference image.')
+    if (!songFile || !imageFiles.length) {
+      setError('Choose an audio file and at least one reference image.')
       return
     }
 
@@ -302,11 +271,7 @@ function App() {
     setIsSubmitting(true)
     try {
       const formData = new FormData()
-      if (useLibrarySong) {
-        formData.append('song_id', selectedSongId)
-      } else {
-        formData.append('song', songFile)
-      }
+      formData.append('song', songFile)
       imageFiles.forEach((file) => formData.append('images', file))
       if (lyricsText.trim()) formData.append('lyrics_text', lyricsText)
       formData.append('song_title', songTitle.trim())
@@ -447,45 +412,8 @@ function App() {
 
           <label className="field-card">
             <span className="field-label">Audio</span>
-            {librarySongs.length ? (
-              <div className="toggle-row">
-                <input
-                  checked={useLibrarySong}
-                  id="use-library-song"
-                  onChange={(e) => setUseLibrarySong(e.target.checked)}
-                  type="checkbox"
-                />
-                <label htmlFor="use-library-song">Use backend song library (no upload)</label>
-              </div>
-            ) : null}
-
-            {useLibrarySong ? (
-              <>
-                <select value={selectedSongId} onChange={(e) => setSelectedSongId(e.target.value)}>
-                  {librarySongs.map((song) => (
-                    <option key={song.id} value={song.id}>
-                      {song.filename} ({formatBytes(song.bytes)})
-                    </option>
-                  ))}
-                </select>
-                <p className="field-hint">Uses the server-side file from `songs/`.</p>
-              </>
-            ) : (
-              <>
-                <input
-                  accept="audio/*,.mp3,.wav,.m4a"
-                  type="file"
-                  onChange={(e) => setSongFile(e.target.files?.[0] ?? null)}
-                />
-                <strong>{songFile ? `${songFile.name} · ${formatBytes(songFile.size)}` : 'No file selected'}</strong>
-              </>
-            )}
-
-            {!librarySongs.length ? (
-              <p className="field-hint">
-                Song library not loaded. If you expect songs from `songs/`, make sure the backend is running and (if enabled) you are signed in.
-              </p>
-            ) : null}
+            <input accept="audio/*,.mp3,.wav,.m4a" type="file" onChange={(e) => setSongFile(e.target.files?.[0] ?? null)} />
+            <strong>{songFile ? `${songFile.name} · ${formatBytes(songFile.size)}` : 'No file selected'}</strong>
           </label>
 
           <label className="field-card">
@@ -647,7 +575,7 @@ function App() {
                       onClick={() => {
                         if (entry.song_title) setSongTitle(entry.song_title)
                         if (entry.song_artist) setSongArtist(entry.song_artist)
-                        if (entry.segment_name) setVideoStyle(entry.segment_name)
+                        if (entry.segment_name) setSegmentName(entry.segment_name)
                         if (entry.model_name) {
                           setModelName(entry.model_name)
                           setModelTouched(true)
