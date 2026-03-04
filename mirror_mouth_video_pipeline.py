@@ -476,6 +476,7 @@ def _apply_generic_config_overrides(base_config, overrides):
         "output_format",
         "master_prompt_template",
         "segment_prompt_template",
+        "backdrop_cycle",
         "script_max_lines_per_segment",
         "export_prompt_bundle",
     }
@@ -1409,6 +1410,7 @@ def run_pipeline(
             "Direction:\n"
             "- Follow MASTER_PROMPT for style, identity, camera, lighting, and framing.\n"
             "- Continuity: first frame continues from previous segment; no reset.\n"
+            "{backdrop_line}\n"
             "- No on-screen text, subtitles, captions, logos, watermarks, or gibberish artifacts.\n"
             "- Escalation: intensity {intensity:.2f} (0..1) guides subtle evolution only when supported by the audio.\n"
         )

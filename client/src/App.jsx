@@ -66,6 +66,8 @@ function App() {
   const [cleanupPresets, setCleanupPresets] = useState([])
   const [cleanupPreset, setCleanupPreset] = useState('homemade_shock')
   const [cleanupJob, setCleanupJob] = useState(null)
+  const [backdropTypes, setBackdropTypes] = useState([])
+  const [backdropType, setBackdropType] = useState('none')
 
   const [defaultModelName, setDefaultModelName] = useState('')
   const [availableModels, setAvailableModels] = useState([])
@@ -151,6 +153,8 @@ function App() {
         setDefaultNonLipSyncModelName(payload.default_non_lipsync_model_name ?? '')
         setCleanupPresets(Array.isArray(payload.cleanup_presets) ? payload.cleanup_presets : [])
         setCleanupPreset(payload.default_cleanup_preset ?? 'homemade_shock')
+        setBackdropTypes(Array.isArray(payload.backdrop_types) ? payload.backdrop_types : [])
+        setBackdropType(payload.default_backdrop_type ?? 'none')
       } catch (e) {
         if (!cancelled) setError(e.message || String(e))
       }
@@ -324,6 +328,7 @@ function App() {
       formData.append('song_artist', songArtist.trim())
       formData.append('model_name', modelName || defaultModelName)
       formData.append('video_style', videoStyle)
+      formData.append('backdrop_type', backdropType)
       formData.append('lip_sync_required', lipSyncRequired ? '1' : '0')
       formData.append('segment_name', videoStyle)
       if (promptOverride.trim()) formData.append('prompt_override', promptOverride.trim())
@@ -572,6 +577,28 @@ function App() {
             )}
           </label>
 
+          <label className="field-card">
+            <span className="field-label">Backdrop type</span>
+            <select value={backdropType} onChange={(e) => setBackdropType(e.target.value)}>
+              {(backdropTypes.length ? backdropTypes : [{ value: 'none', label: 'None (no backdrop screen)' }])
+                .slice()
+                .sort((a, b) => String(a.label || a.value).localeCompare(String(b.label || b.value)))
+                .map((backdrop) => (
+                  <option key={backdrop.value} value={backdrop.value}>
+                    {backdrop.label || prettyLabel(backdrop.value)}
+                  </option>
+                ))}
+            </select>
+            {backdropTypes.length ? (
+              <p className="field-hint">
+                {(backdropTypes.find((backdrop) => backdrop.value === backdropType) || {}).description ||
+                  'Rotate or lock a diegetic screen/mirror backdrop per segment.'}
+              </p>
+            ) : (
+              <p className="field-hint">Rotate or lock a diegetic screen/mirror backdrop per segment.</p>
+            )}
+          </label>
+
           {showAdvanced ? (
             <div className="field-card">
               <div className="field-label">Prompt engine (advanced)</div>
@@ -717,6 +744,7 @@ function App() {
                         if (entry.song_title) setSongTitle(entry.song_title)
                         if (entry.song_artist) setSongArtist(entry.song_artist)
                         if (entry.segment_name || entry.video_style) setVideoStyle(entry.segment_name || entry.video_style)
+                        if (entry.backdrop_type) setBackdropType(entry.backdrop_type)
                         if (entry.model_name) {
                           setModelName(entry.model_name)
                           setModelTouched(true)

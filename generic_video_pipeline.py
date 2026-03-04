@@ -163,6 +163,7 @@ class VideoPipelineConfig:
     # Prompt templates (optional). If empty, PromptEngine must override.
     master_prompt_template: str = ""
     segment_prompt_template: str = ""
+    backdrop_cycle: List[str] = field(default_factory=list)
 
     # Script mapping knobs (heuristic defaults; can be tuned per project).
     script_max_lines_per_segment: int = 4
@@ -273,6 +274,10 @@ class PromptEngine:
                 "script": script_text or "",
             }
         )
+        backdrop_cycle = [str(item).strip() for item in (self.config.backdrop_cycle or []) if str(item).strip()]
+        backdrop = backdrop_cycle[segment.index % len(backdrop_cycle)] if backdrop_cycle else ""
+        payload["backdrop"] = backdrop
+        payload["backdrop_line"] = f"- Backdrop: {backdrop}" if backdrop else ""
         segment_block = template.format(**payload).strip()
 
         if master_prompt:

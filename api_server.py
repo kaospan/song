@@ -153,6 +153,83 @@ VIDEO_STYLE_PRESETS = {
     },
 }
 
+BACKDROP_TYPES = [
+    {
+        "value": "none",
+        "label": "None (no backdrop screen)",
+        "description": "Do not force a diegetic screen or mirror.",
+        "prompt": "",
+    },
+    {
+        "value": "rotate_all",
+        "label": "Rotate All (per segment)",
+        "description": "Cycle through all backdrop types automatically each segment.",
+        "prompt": "",
+    },
+    {
+        "value": "bathroom_mirror",
+        "label": "Public Bathroom Mirror",
+        "description": "Small mirror in a public restroom, gritty realism.",
+        "prompt": "public bathroom mirror",
+    },
+    {
+        "value": "subway_ad",
+        "label": "Subway Advertisement Screen",
+        "description": "Station platform ad display or digital billboard.",
+        "prompt": "subway station advertisement screen",
+    },
+    {
+        "value": "street_window",
+        "label": "Busy Street Window",
+        "description": "Video appears as a window on a busy city street.",
+        "prompt": "window on a busy street",
+    },
+    {
+        "value": "wall_art",
+        "label": "Framed Art On Wall",
+        "description": "Gallery or apartment wall art with the video as the artwork.",
+        "prompt": "framed art on a wall",
+    },
+    {
+        "value": "bus_stop",
+        "label": "Bus Stop Poster Case",
+        "description": "Transit shelter poster frame or lightbox.",
+        "prompt": "bus stop poster case",
+    },
+    {
+        "value": "gallery_lightbox",
+        "label": "Gallery Lightbox",
+        "description": "Museum lightbox display with subtle reflections.",
+        "prompt": "gallery lightbox",
+    },
+    {
+        "value": "arcade_screen",
+        "label": "Arcade Cabinet Screen",
+        "description": "Retro cabinet screen showing the video.",
+        "prompt": "arcade cabinet screen",
+    },
+    {
+        "value": "elevator_mirror",
+        "label": "Elevator Mirror Inset",
+        "description": "Mirror with a small inset display panel.",
+        "prompt": "elevator mirror with a small inset display",
+    },
+    {
+        "value": "shop_tv",
+        "label": "Shop TV Behind Glass",
+        "description": "Storefront TV or display behind glass.",
+        "prompt": "shop TV behind glass",
+    },
+    {
+        "value": "phone_screen",
+        "label": "Phone Screen (Steady Hand)",
+        "description": "A steady phone screen held close to camera.",
+        "prompt": "phone screen held steady in hand",
+    },
+]
+
+DEFAULT_BACKDROP_TYPE = os.environ.get("DEFAULT_BACKDROP_TYPE", "none").strip()
+
 VIDEO_CLEANUP_PRESETS = {
     "cinematic_pro": {
         "label": "Cinematic Pro",
@@ -503,6 +580,19 @@ def save_upload(upload, destination):
         shutil.copyfileobj(upload.file, buffer)
 
 
+def resolve_backdrop_cycle(backdrop_type: str) -> list[str]:
+    value = (backdrop_type or "").strip()
+    if not value or value == "none":
+        return []
+    if value == "rotate_all":
+        return [entry["prompt"] for entry in BACKDROP_TYPES if entry.get("prompt")]
+    for entry in BACKDROP_TYPES:
+        if entry.get("value") == value:
+            prompt = (entry.get("prompt") or "").strip()
+            return [prompt] if prompt else []
+    return []
+
+
 def resolve_cleanup_preset(preset_key: str) -> dict:
     key = (preset_key or "").strip() or DEFAULT_CLEANUP_PRESET
     if key not in VIDEO_CLEANUP_PRESETS:
@@ -706,6 +796,7 @@ def run_job(
     song_title,
     song_artist,
     video_style,
+    backdrop_type,
     lip_sync_required,
     segment_name,
     prompt_override,
@@ -768,6 +859,7 @@ def run_job(
             "song_artist": song_artist,
             "model_name": model_name,
             "video_style": video_style,
+            "backdrop_type": backdrop_type,
             "lip_sync_required": lip_sync_required,
             "segment_name": segment_name,
             "prompt": prompt_text,
@@ -846,6 +938,15 @@ def config():
             for key, preset in VIDEO_STYLE_PRESETS.items()
         ],
         "default_video_style": "cinematic_studio",
+        "backdrop_types": [
+            {
+                "value": entry.get("value", ""),
+                "label": entry.get("label", entry.get("value", "")),
+                "description": entry.get("description", ""),
+            }
+            for entry in BACKDROP_TYPES
+        ],
+        "default_backdrop_type": DEFAULT_BACKDROP_TYPE or "none",
         "cleanup_presets": [
             {
                 "value": key,
@@ -901,6 +1002,7 @@ def create_job(
     song_title: str = Form(""),
     song_artist: str = Form(""),
     video_style: str = Form("cinematic_studio"),
+    backdrop_type: str = Form("none"),
     lip_sync_required: str = Form("1"),
     segment_name: str = Form(""),
     prompt_override: str = Form(""),
@@ -919,6 +1021,10 @@ def create_job(
             raise HTTPException(status_code=422, detail="generic_config_json must be valid JSON.")
         if not isinstance(generic_config_overrides, dict):
             raise HTTPException(status_code=422, detail="generic_config_json must be a JSON object.")
+    backdrop_type = (backdrop_type or "none").strip()
+    backdrop_cycle = resolve_backdrop_cycle(backdrop_type)
+    if backdrop_cycle and "backdrop_cycle" not in generic_config_overrides:
+        generic_config_overrides["backdrop_cycle"] = backdrop_cycle
     resolved_model_name = (model_name or "").strip()
     if not resolved_model_name:
         models = fetch_models_metadata()
@@ -992,6 +1098,7 @@ def create_job(
             "song_title": song_title,
             "song_artist": song_artist,
             "video_style": video_style,
+            "backdrop_type": backdrop_type,
             "lip_sync_required": lip_sync,
             "segment_name": segment_name,
             "model_name": resolved_model_name,
@@ -1021,6 +1128,7 @@ def create_job(
             song_title,
             song_artist,
             video_style,
+            backdrop_type,
             lip_sync,
             segment_name,
             prompt_override,
