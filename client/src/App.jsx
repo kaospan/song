@@ -66,6 +66,10 @@ function App() {
   const [cleanupPresets, setCleanupPresets] = useState([])
   const [cleanupPreset, setCleanupPreset] = useState('homemade_shock')
   const [cleanupJob, setCleanupJob] = useState(null)
+  const [finishFile, setFinishFile] = useState(null)
+  const [finishFps, setFinishFps] = useState(24)
+  const [finishScale, setFinishScale] = useState(2)
+  const [finishJob, setFinishJob] = useState(null)
   const [backdropTypes, setBackdropTypes] = useState([])
   const [backdropType, setBackdropType] = useState('none')
 
@@ -85,6 +89,7 @@ function App() {
 
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isCleanupSubmitting, setIsCleanupSubmitting] = useState(false)
+  const [isFinishSubmitting, setIsFinishSubmitting] = useState(false)
 
   const authHeaders = useMemo(() => (authToken ? { Authorization: `Bearer ${authToken}` } : {}), [authToken])
 
@@ -228,6 +233,21 @@ function App() {
     }, 5000)
     return () => window.clearInterval(intervalId)
   }, [apiBase, authHeaders, cleanupJob])
+
+  useEffect(() => {
+    if (!finishJob || !['queued', 'processing'].includes(finishJob.status)) return undefined
+    const intervalId = window.setInterval(async () => {
+      try {
+        const resp = await fetch(`${apiBase}/api/finish/${finishJob.id}`, { headers: { ...authHeaders } })
+        const payload = await resp.json()
+        if (!resp.ok) throw new Error(payload.detail || 'Unable to refresh finisher status.')
+        setFinishJob(payload)
+      } catch (e) {
+        setError(e.message || String(e))
+      }
+    }, 5000)
+    return () => window.clearInterval(intervalId)
+  }, [apiBase, authHeaders, finishJob])
 
   async function testBackendConnection() {
     const next = normalizeApiBase(apiBaseUrl)
@@ -381,6 +401,42 @@ function App() {
     }
   }
 
+  async function handleFinishSubmit(event) {
+    event.preventDefault()
+
+    if (!apiBase) {
+      setError('Set a backend URL first.')
+      setShowAdvanced(true)
+      return
+    }
+    if (authConfig.auth_enabled && !authToken) {
+      setError('Sign in first.')
+      setShowAdvanced(true)
+      return
+    }
+    if (!finishFile) {
+      setError('Choose a video file to finish.')
+      return
+    }
+
+    setError('')
+    setIsFinishSubmitting(true)
+    try {
+      const formData = new FormData()
+      formData.append('video', finishFile)
+      formData.append('fps', String(finishFps || 24))
+      formData.append('scale', String(finishScale || 2))
+      const resp = await fetch(`${apiBase}/api/finish`, { method: 'POST', body: formData, headers: { ...authHeaders } })
+      const payload = await resp.json()
+      if (!resp.ok) throw new Error(payload.detail || 'Unable to start finisher.')
+      setFinishJob(payload)
+    } catch (e) {
+      setError(e.message || String(e))
+    } finally {
+      setIsFinishSubmitting(false)
+    }
+  }
+
   const modelOptions = useMemo(() => {
     if (!availableModels?.length) return []
     const filtered = availableModels.filter((m) => (lipSyncRequired ? m.requires_audio_input : !m.requires_audio_input))
@@ -391,6 +447,7 @@ function App() {
   const modelMismatch = Boolean(lipSyncRequired && selectedModel && !selectedModel.requires_audio_input)
   const videoUrl = job?.status === 'complete' ? `${apiBase}${job.download_url}` : ''
   const cleanupVideoUrl = cleanupJob?.status === 'complete' ? `${apiBase}${cleanupJob.download_url}` : ''
+  const finishVideoUrl = finishJob?.status === 'complete' ? `${apiBase}${finishJob.download_url}` : ''
 
   return (
     <main className="app-shell">
@@ -838,6 +895,59 @@ function App() {
           </>
         ) : (
           <div className="video-placeholder">Upload a video to clean and the refined MP4 will appear here.</div>
+        )}
+      </section>
+
+      <section className="output-panel">
+        <div className="panel-header">
+          <h2>Finisher</h2>
+          <span className={`status-pill ${finishJob?.status ?? 'idle'}`}>{finishJob?.status ?? 'idle'}</span>
+        </div>
+
+        <form className="field-card" onSubmit={handleFinishSubmit}>
+          <div className="field-label">Upload final video to finish</div>
+          <input
+            accept="video/*,.mp4,.mov,.mkv,.webm"
+            type="file"
+            onChange={(e) => setFinishFile(e.target.files?.[0] ?? null)}
+          />
+          <strong>{finishFile ? `${finishFile.name} · ${formatBytes(finishFile.size)}` : 'No file selected'}</strong>
+
+          <div className="backend-row">
+            <input
+              type="number"
+              min="1"
+              max="120"
+              placeholder="FPS"
+              value={finishFps}
+              onChange={(e) => setFinishFps(Number(e.target.value || 24))}
+            />
+            <input
+              type="number"
+              min="1"
+              max="4"
+              placeholder="Scale"
+              value={finishScale}
+              onChange={(e) => setFinishScale(Number(e.target.value || 2))}
+            />
+          </div>
+          <p className="field-hint">Finisher uses Real-ESRGAN + temporal smoothing + film grain. Requires ffmpeg and realesrgan-ncnn-vulkan.</p>
+
+          <button className="launch-button" disabled={isFinishSubmitting} type="submit">
+            {isFinishSubmitting ? 'Starting finisher...' : 'Run finisher'}
+          </button>
+        </form>
+
+        {finishJob?.message ? <p className="status-copy">{finishJob.message}</p> : null}
+        {finishVideoUrl ? (
+          <>
+            <a className="download-link" href={finishVideoUrl}>
+              Download finished MP4
+            </a>
+            <video className="result-video" controls src={finishVideoUrl} />
+          </>
+        ) : (
+          <div className="video-placeholder">Upload a video to run the finisher pipeline.</div>
         )}
       </section>
     </main>

@@ -91,6 +91,11 @@ def hash_file(path, chunk_size=1024 * 1024):
     return hasher.hexdigest()
 
 
+def get_audio_duration_ms(input_mp3):
+    audio = AudioSegment.from_file(input_mp3)
+    return len(audio)
+
+
 def sha256_text(value):
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
 
@@ -157,6 +162,9 @@ IMAGE_ASSET_CACHE_PATH = (
 )
 PROMPT_CACHE_ROOT = normalize_env_path(os.environ.get("PROMPT_CACHE_ROOT")) or "job_runs/prompt_cache"
 AUDIO_CACHE_ROOT = normalize_env_path(os.environ.get("AUDIO_CACHE_ROOT"))
+AUDIO_CACHE_INDEX_PATH = (
+    normalize_env_path(os.environ.get("AUDIO_CACHE_INDEX_PATH")) or "job_runs/audio_cache_index.json"
+)
 REUSE_IMAGE_ASSET = os.environ.get("REUSE_IMAGE_ASSET", "1").strip().lower() not in ("0", "false", "no")
 FORCE_IMAGE_UPLOAD = os.environ.get("FORCE_IMAGE_UPLOAD", "0").strip().lower() in ("1", "true", "yes")
 REUSE_AUDIO_ASSET = os.environ.get("REUSE_AUDIO_ASSET", "1").strip().lower() not in ("0", "false", "no")
@@ -185,6 +193,27 @@ DOWNLOAD_RETRY_BACKOFF_SECONDS = float(os.environ.get("DOWNLOAD_RETRY_BACKOFF_SE
 PROMPT_CHAR_LIMIT = int(os.environ.get("PROMPT_CHAR_LIMIT", "2500"))
 RESUME_SESSION = normalize_env_path(os.environ.get("RESUME_SESSION"))
 SESSION_LABEL = os.environ.get("SESSION_LABEL")
+REPEAT_MASTER_PROMPT = os.environ.get("REPEAT_MASTER_PROMPT", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+LOCK_REFERENCE_IMAGE = os.environ.get("LOCK_REFERENCE_IMAGE", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+DRY_RUN_VALIDATE = os.environ.get("DRY_RUN_VALIDATE", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TEST_SEGMENT_ONLY = os.environ.get("TEST_SEGMENT_ONLY", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TEST_SEGMENT_INDEX = int(os.environ.get("TEST_SEGMENT_INDEX", "1"))
 
 API_BASE = "https://api.hedra.com/web-app/public"
 API_KEY = os.environ.get("API_KEY")
@@ -582,7 +611,6 @@ def pick_fallback_model(models, require_audio_input):
     if require_audio_input:
         preferred = [
             "kling ai avatar v2 standard",
-            "kling ai avatar v2 pro",
             "hedra avatar",
         ]
         for pref in preferred:
@@ -895,6 +923,9 @@ def load_cached_audio_segments(output_audio_folder, input_mp3_hash, segment_leng
     manifest_path = os.path.join(output_audio_folder, "segments_manifest.json")
     manifest = load_json_file(manifest_path)
     if not manifest:
+        cached_folder = resolve_audio_cache_folder(input_mp3_hash, segment_length_seconds)
+        if cached_folder and os.path.normpath(cached_folder) != os.path.normpath(output_audio_folder):
+            return load_cached_audio_segments(cached_folder, input_mp3_hash, segment_length_seconds)
         return None
 
     if manifest.get("input_mp3_hash") != input_mp3_hash:
@@ -922,6 +953,21 @@ def load_cached_audio_segments(output_audio_folder, input_mp3_hash, segment_leng
     return audio_files
 
 
+def resolve_audio_cache_folder(input_mp3_hash, segment_length_seconds):
+    if not AUDIO_CACHE_INDEX_PATH:
+        return None
+    index = load_json_file(AUDIO_CACHE_INDEX_PATH) or {}
+    entry = index.get(input_mp3_hash)
+    if not entry:
+        return None
+    if entry.get("segment_length_seconds") != segment_length_seconds:
+        return None
+    folder = entry.get("path")
+    if folder and os.path.isdir(folder):
+        return folder
+    return None
+
+
 def write_segments_manifest(output_audio_folder, input_mp3, input_mp3_hash, segment_length_seconds, audio_files):
     manifest_path = os.path.join(output_audio_folder, "segments_manifest.json")
     manifest = {
@@ -936,6 +982,15 @@ def write_segments_manifest(output_audio_folder, input_mp3, input_mp3_hash, segm
         "created_at": datetime.now().isoformat(),
     }
     write_json_file(manifest_path, manifest)
+    if AUDIO_CACHE_INDEX_PATH:
+        index = load_json_file(AUDIO_CACHE_INDEX_PATH) or {}
+        index[input_mp3_hash] = {
+            "path": os.path.abspath(output_audio_folder),
+            "segment_length_seconds": segment_length_seconds,
+            "segment_count": len(audio_files),
+            "updated_at": datetime.now().isoformat(),
+        }
+        write_json_file(AUDIO_CACHE_INDEX_PATH, index)
 
 
 def split_audio(input_mp3, output_audio_folder, segment_length_seconds):
@@ -1309,6 +1364,35 @@ def run_pipeline(
         if run_archive_dir:
             os.makedirs(run_archive_dir, exist_ok=True)
 
+        if DRY_RUN_VALIDATE:
+            prompt_text = (
+                validate_prompt_text(prompt_override) if prompt_override else load_prompt_text(prompt_file)
+            )
+            lyrics_preview = None
+            if lyrics_text is not None:
+                lyrics_preview = lyrics_text
+            elif lyrics_file:
+                lyrics_preview = load_lyrics_text(lyrics_file)
+            duration_ms = get_audio_duration_ms(input_mp3)
+            segment_count = math.ceil(duration_ms / (segment_length_seconds * 1000))
+            if TEST_SEGMENT_ONLY:
+                if TEST_SEGMENT_INDEX < 1 or TEST_SEGMENT_INDEX > segment_count:
+                    raise ValueError(
+                        f"TEST_SEGMENT_INDEX {TEST_SEGMENT_INDEX} is out of range (1..{segment_count})."
+                    )
+            if model_name:
+                models = fetch_models_metadata()
+                resolve_model(model_name, require_audio_input=lip_sync_required, models=models)
+            print("Dry-run validation passed.")
+            return {
+                "dry_run": True,
+                "segment_count": segment_count,
+                "prompt_preview_chars": len(prompt_text),
+                "lyrics_present": bool(lyrics_preview),
+                "input_mp3": os.path.abspath(input_mp3),
+                "reference_images": [os.path.abspath(path) for path in reference_images],
+            }
+
         session_video_folder = build_session_video_folder(
             output_video_root,
             session_label=session_label,
@@ -1391,6 +1475,8 @@ def run_pipeline(
         segment_prompt_rows = list(generic_segments_payload.get("segments", []) or [])
         segment_prompt_texts = [row.get("segmentPrompt", "").strip() for row in segment_prompt_rows]
         lyrics_by_segment = [row.get("scriptLines", "") for row in segment_prompt_rows]
+        if REPEAT_MASTER_PROMPT:
+            segment_prompt_texts = [master_prompt_text.strip()] * len(audio_files)
 
         write_text_file(os.path.join(session_video_folder, "master_prompt.txt"), master_prompt_text)
         write_text_file(os.path.join(session_video_folder, "lyrics.txt"), lyrics_text or "")
@@ -1618,14 +1704,26 @@ def run_pipeline(
         current_start_keyframe_id = image_asset_ids[0]
         segment_jobs = load_segment_jobs(session_video_folder)
     
+        test_segment_index = max(0, TEST_SEGMENT_INDEX - 1)
+        if TEST_SEGMENT_ONLY:
+            if test_segment_index >= len(audio_files):
+                raise ValueError(
+                    f"TEST_SEGMENT_INDEX {TEST_SEGMENT_INDEX} is out of range (1..{len(audio_files)})."
+                )
+            print(
+                f"Test-segment mode: generating only segment {test_segment_index + 1}/{len(audio_files)}"
+            )
+
         for idx, (audio_file, audio_duration_ms) in enumerate(audio_files):
+            if TEST_SEGMENT_ONLY and idx != test_segment_index:
+                continue
             print(f"\nProcessing segment {idx + 1}/{len(audio_files)}")
             video_path = os.path.join(session_video_folder, f"video_{idx:03}.mp4")
     
             if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
                 print("Skipping existing video segment:", video_path)
                 video_files.append(video_path)
-                if idx < len(audio_files) - 1:
+                if idx < len(audio_files) - 1 and not LOCK_REFERENCE_IMAGE:
                     current_start_keyframe_id = upload_continuity_frame(
                         video_path,
                         idx,
@@ -1659,7 +1757,7 @@ def run_pipeline(
                     segment_jobs[segment_key]["video_path"] = video_path
                     save_segment_jobs(session_video_folder, segment_jobs)
     
-                    if idx < len(audio_files) - 1:
+                    if idx < len(audio_files) - 1 and not LOCK_REFERENCE_IMAGE:
                         current_start_keyframe_id = upload_continuity_frame(
                             video_path,
                             idx,
@@ -1814,7 +1912,7 @@ def run_pipeline(
             segment_jobs[segment_key]["video_path"] = video_path
             save_segment_jobs(session_video_folder, segment_jobs)
     
-            if idx < len(audio_files) - 1:
+            if idx < len(audio_files) - 1 and not LOCK_REFERENCE_IMAGE:
                 current_start_keyframe_id = upload_continuity_frame(
                     video_path,
                     idx,
@@ -1824,12 +1922,27 @@ def run_pipeline(
             if request_delay_seconds > 0:
                 print(f"Waiting {request_delay_seconds} seconds (rate limit buffer)...")
                 time.sleep(request_delay_seconds)
-    
+
         if asset_cache_dirty and image_asset_cache_path and asset_cache:
             save_asset_cache(image_asset_cache_path, asset_cache)
-    
+
         if not video_files:
             raise RuntimeError("No video segments were generated. Check credits and API errors.")
+
+        if TEST_SEGMENT_ONLY:
+            print("\nTest segment complete. Skipping final stitch.")
+            completed_successfully = True
+            return {
+                "final_video": None,
+                "versioned_final_video": None,
+                "session_video_folder": os.path.abspath(session_video_folder),
+                "videos_manifest": os.path.abspath(videos_manifest_path),
+                "video_segments": [os.path.abspath(path) for path in video_files],
+                "reused_cached_audio": reused_cached_audio,
+                "reused_image_asset": reused_image_asset,
+                "creative_assets": creative_assets,
+                "test_segment_index": test_segment_index + 1,
+            }
     
         if len(video_files) < len(audio_files):
             print(

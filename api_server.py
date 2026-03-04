@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import subprocess
 import threading
 import traceback
@@ -560,6 +561,8 @@ def serialize_job(job):
     if serialized["status"] == "complete":
         if serialized.get("job_type") == "cleanup":
             serialized["download_url"] = f"/api/cleanup/{serialized['id']}/video"
+        elif serialized.get("job_type") == "finish":
+            serialized["download_url"] = f"/api/finish/{serialized['id']}/video"
         else:
             serialized["download_url"] = f"/api/jobs/{serialized['id']}/video"
     return serialized
@@ -912,6 +915,69 @@ def run_cleanup_job(username, job_id, video_path, preset_key):
     )
 
 
+def run_finish_job(username, job_id, video_path, fps, scale):
+    job_dir = JOB_ROOT / job_id
+    work_dir = job_dir / "finisher"
+    output_master = job_dir / "master_video.mov"
+    output_final = job_dir / "final_video.mp4"
+
+    update_job(
+        job_id,
+        status="processing",
+        message="Running AI finisher pipeline.",
+    )
+
+    script_path = BASE_DIR / "ai_music_video_finisher.py"
+    if not script_path.exists():
+        update_job(
+            job_id,
+            status="error",
+            message="Finisher script not found.",
+            error=str(script_path),
+        )
+        return
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--input",
+        str(video_path),
+        "--work-dir",
+        str(work_dir),
+        "--output-master",
+        str(output_master),
+        "--output-final",
+        str(output_final),
+        "--fps",
+        str(int(fps)),
+        "--scale",
+        str(int(scale)),
+    ]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            details = (proc.stderr or proc.stdout or "Unknown finisher error.").strip()
+            raise RuntimeError(details)
+    except Exception as exc:
+        update_job(
+            job_id,
+            status="error",
+            message="Finisher pipeline failed.",
+            error=str(exc),
+            traceback=traceback.format_exc(),
+        )
+        return
+
+    update_job(
+        job_id,
+        status="complete",
+        message="Finisher complete.",
+        master_video=str(output_master),
+        final_video=str(output_final),
+    )
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
@@ -1217,6 +1283,86 @@ def download_cleanup_video(job_id: str, username: str = Depends(require_user)):
     if job["status"] != "complete" or not job.get("cleaned_video"):
         raise HTTPException(status_code=409, detail="Cleanup not complete.")
     video_path = Path(job["cleaned_video"])
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Output video not found.")
+    return FileResponse(video_path, media_type="video/mp4", filename=video_path.name)
+
+
+@app.post("/api/finish", status_code=202)
+def create_finish_job(
+    username: str = Depends(require_user),
+    video: UploadFile = File(...),
+    fps: int = Form(24),
+    scale: int = Form(2),
+):
+    if video is None:
+        raise HTTPException(status_code=422, detail="Provide a video file to finish.")
+
+    job_id = uuid.uuid4().hex
+    job_dir = JOB_ROOT / job_id
+    uploads_dir = job_dir / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    video_name = Path(video.filename or "input.mp4").name
+    video_path = uploads_dir / video_name
+    save_upload(video, video_path)
+
+    with jobs_lock:
+        jobs[job_id] = {
+            "id": job_id,
+            "job_type": "finish",
+            "status": "queued",
+            "message": "Queued finisher job.",
+            "created_at": iso_now(),
+            "updated_at": iso_now(),
+            "username": username,
+            "input_video": str(video_path),
+            "fps": int(fps),
+            "scale": int(scale),
+            "master_video": None,
+            "final_video": None,
+            "error": None,
+            "traceback": None,
+        }
+
+    thread = threading.Thread(
+        target=run_finish_job,
+        args=(
+            username,
+            job_id,
+            str(video_path),
+            int(fps),
+            int(scale),
+        ),
+        daemon=True,
+    )
+    thread.start()
+
+    return serialize_job(jobs[job_id])
+
+
+@app.get("/api/finish/{job_id}")
+def get_finish_job(job_id: str, username: str = Depends(require_user)):
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job or job.get("job_type") != "finish":
+        raise HTTPException(status_code=404, detail="Finisher job not found.")
+    if AUTH_ENABLED and job.get("username") != username:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+    return serialize_job(job)
+
+
+@app.get("/api/finish/{job_id}/video")
+def download_finish_video(job_id: str, username: str = Depends(require_user)):
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job or job.get("job_type") != "finish":
+        raise HTTPException(status_code=404, detail="Finisher job not found.")
+    if AUTH_ENABLED and job.get("username") != username:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+    if job["status"] != "complete" or not job.get("final_video"):
+        raise HTTPException(status_code=409, detail="Finisher not complete.")
+    video_path = Path(job["final_video"])
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Output video not found.")
     return FileResponse(video_path, media_type="video/mp4", filename=video_path.name)
