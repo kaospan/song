@@ -188,6 +188,24 @@ def get_headers(content_type=None):
     return headers
 
 
+def _is_presigned_s3_url(url):
+    if not url:
+        return False
+    from urllib.parse import urlparse, parse_qs
+
+    parsed = urlparse(url)
+    params = {k.lower(): v for k, v in parse_qs(parsed.query).items()}
+    presign_keys = {
+        "x-amz-algorithm",
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
+        "awsaccesskeyid",
+        "signature",
+    }
+    return bool(presign_keys & set(params.keys()))
+
+
 def raise_with_body(resp: requests.Response):
     try:
         body = resp.text
@@ -1203,8 +1221,8 @@ def poll_generation_status(status_url):
             time.sleep(retry_delay)
             continue
 
-        status_response.raise_for_status()
-        status_json = status_response.json()
+        status_resp.raise_for_status()
+        status_json = status_resp.json()
 
         consecutive_failures = 0
         status_json = status_resp.json()

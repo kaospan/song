@@ -1,0 +1,172 @@
+{
+  "MASTER_PROMPT": "",
+  "config": {
+    "anomaly_rules": {},
+    "camera_mode": {},
+    "custom_escalation": null,
+    "escalation_curve": "linear",
+    "export_prompt_bundle": true,
+    "master_prompt_template": "",
+    "narrative_mode": "performance",
+    "output_format": {
+      "aspect_ratio": "9:16",
+      "resolution": "720p"
+    },
+    "pacing_profile": {},
+    "script_max_lines_per_segment": 4,
+    "segment_duration_seconds": 8.0,
+    "segment_prompt_template": "",
+    "style_profile": {},
+    "visual_rules": {}
+  },
+  "created_at": "2026-03-04T09:44:15.378220",
+  "media": {
+    "duration_ms": 156400,
+    "media_type": "audio",
+    "sha256": "e6f5150056a84fd18b3dd6a9cbef537133d3fa91ae2368f63e0f4f84e9ce4769",
+    "source_path": "full_song.mp3"
+  },
+  "pipeline": "generic_video_pipeline",
+  "segments": [
+    {
+      "intensity": 0.0,
+      "scriptLines": "Under My Skin\n[Verse 1]\nWide awake at three",
+      "segmentNumber": 1,
+      "segmentPrompt": "SEGMENT 01 (00:00-00:08)\nNarrative mode: performance\nIntensity: 0.00\nScript (do not render as on-screen text):\nUnder My Skin\n[Verse 1]\nWide awake at three\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "00:00-00:08"
+    },
+    {
+      "intensity": 0.05263157894736842,
+      "scriptLines": "Ceiling breathing back at me\nEvery corner\nGot a shape I swear I\u2019ve seen",
+      "segmentNumber": 2,
+      "segmentPrompt": "SEGMENT 02 (00:08-00:16)\nNarrative mode: performance\nIntensity: 0.05\nScript (do not render as on-screen text):\nCeiling breathing back at me\nEvery corner\nGot a shape I swear I\u2019ve seen\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "00:08-00:16"
+    },
+    {
+      "intensity": 0.10526315789473684,
+      "scriptLines": "Heartbeat on a wire\nEyes adjust, the room conspires\nI taste metal",
+      "segmentNumber": 3,
+      "segmentPrompt": "SEGMENT 03 (00:16-00:24)\nNarrative mode: performance\nIntensity: 0.11\nScript (do not render as on-screen text):\nHeartbeat on a wire\nEyes adjust, the room conspires\nI taste metal\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "00:16-00:24"
+    },
+    {
+      "intensity": 0.15789473684210525,
+      "scriptLines": "Like a storm behind my teeth\n[Chorus]\nSomething\u2019s moving under my skin",
+      "segmentNumber": 4,
+      "segmentPrompt": "SEGMENT 04 (00:24-00:32)\nNarrative mode: performance\nIntensity: 0.16\nScript (do not render as on-screen text):\nLike a storm behind my teeth\n[Chorus]\nSomething\u2019s moving under my skin\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "00:24-00:32"
+    },
+    {
+      "intensity": 0.21052631578947367,
+      "scriptLines": "Crawling out when the dark drags in\nI\u2019m afraid of the things I want\nI\u2019m afraid of the thoughts I feed",
+      "segmentNumber": 5,
+      "segmentPrompt": "SEGMENT 05 (00:32-00:40)\nNarrative mode: performance\nIntensity: 0.21\nScript (do not render as on-screen text):\nCrawling out when the dark drags in\nI\u2019m afraid of the things I want\nI\u2019m afraid of the thoughts I feed\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "00:32-00:40"
+    },
+    {
+      "intensity": 0.2631578947368421,
+      "scriptLines": "Pull me deeper under my skin\nTill I don\u2019t know where I end or begin\nEvery fear that I outrun",
+      "segmentNumber": 6,
+      "segmentPrompt": "SEGMENT 06 (00:40-00:48)\nNarrative mode: performance\nIntensity: 0.26\nScript (do not render as on-screen text):\nPull me deeper under my skin\nTill I don\u2019t know where I end or begin\nEvery fear that I outrun\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "00:40-00:48"
+    },
+    {
+      "intensity": 0.3157894736842105,
+      "scriptLines": "Finds a way back into me\n[Verse 2]\nHands shake but I don\u2019t stop",
+      "segmentNumber": 7,
+      "segmentPrompt": "SEGMENT 07 (00:48-00:56)\nNarrative mode: performance\nIntensity: 0.32\nScript (do not render as on-screen text):\nFinds a way back into me\n[Verse 2]\nHands shake but I don\u2019t stop\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "00:48-00:56"
+    },
+    {
+      "intensity": 0.3684210526315789,
+      "scriptLines": "Let the rush connect the dots\nEvery secret\nEchoes down the hallway walls",
+      "segmentNumber": 8,
+      "segmentPrompt": "SEGMENT 08 (00:56-01:04)\nNarrative mode: performance\nIntensity: 0.37\nScript (do not render as on-screen text):\nLet the rush connect the dots\nEvery secret\nEchoes down the hallway walls\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "00:56-01:04"
+    },
+    {
+      "intensity": 0.42105263157894735,
+      "scriptLines": "Kiss the risk, inhale the burn\nEvery lesson I unlearn\nFeels familiar",
+      "segmentNumber": 9,
+      "segmentPrompt": "SEGMENT 09 (01:04-01:12)\nNarrative mode: performance\nIntensity: 0.42\nScript (do not render as on-screen text):\nKiss the risk, inhale the burn\nEvery lesson I unlearn\nFeels familiar\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "01:04-01:12"
+    },
+    {
+      "intensity": 0.47368421052631576,
+      "scriptLines": "Like I\u2019ve worn this mask for years\n[Chorus]\nSomething\u2019s moving under my skin",
+      "segmentNumber": 10,
+      "segmentPrompt": "SEGMENT 10 (01:12-01:20)\nNarrative mode: performance\nIntensity: 0.47\nScript (do not render as on-screen text):\nLike I\u2019ve worn this mask for years\n[Chorus]\nSomething\u2019s moving under my skin\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "01:12-01:20"
+    },
+    {
+      "intensity": 0.5263157894736842,
+      "scriptLines": "Crawling out when the dark drags in\nI\u2019m afraid of the things I want\nI\u2019m afraid of the thoughts I feed",
+      "segmentNumber": 11,
+      "segmentPrompt": "SEGMENT 11 (01:20-01:28)\nNarrative mode: performance\nIntensity: 0.53\nScript (do not render as on-screen text):\nCrawling out when the dark drags in\nI\u2019m afraid of the things I want\nI\u2019m afraid of the thoughts I feed\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "01:20-01:28"
+    },
+    {
+      "intensity": 0.5789473684210527,
+      "scriptLines": "Pull me deeper under my skin\nTill I don\u2019t know where I end or begin\nEvery fear that I outrun",
+      "segmentNumber": 12,
+      "segmentPrompt": "SEGMENT 12 (01:28-01:36)\nNarrative mode: performance\nIntensity: 0.58\nScript (do not render as on-screen text):\nPull me deeper under my skin\nTill I don\u2019t know where I end or begin\nEvery fear that I outrun\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "01:28-01:36"
+    },
+    {
+      "intensity": 0.631578947368421,
+      "scriptLines": "Still comes crawling back to me\n[Bridge]\nDo I open up or barricade?",
+      "segmentNumber": 13,
+      "segmentPrompt": "SEGMENT 13 (01:36-01:44)\nNarrative mode: performance\nIntensity: 0.63\nScript (do not render as on-screen text):\nStill comes crawling back to me\n[Bridge]\nDo I open up or barricade?\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "01:36-01:44"
+    },
+    {
+      "intensity": 0.6842105263157895,
+      "scriptLines": "Do I chase the thrill or numb the ache?\nIf I drop the fear, what\u2019s left of me?\nIf I let it win, will it set me free?",
+      "segmentNumber": 14,
+      "segmentPrompt": "SEGMENT 14 (01:44-01:52)\nNarrative mode: performance\nIntensity: 0.68\nScript (do not render as on-screen text):\nDo I chase the thrill or numb the ache?\nIf I drop the fear, what\u2019s left of me?\nIf I let it win, will it set me free?\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "01:44-01:52"
+    },
+    {
+      "intensity": 0.7368421052631579,
+      "scriptLines": "[Final Chorus]\nSomething\u2019s moving under my skin\nCrawling out when the dark drags in",
+      "segmentNumber": 15,
+      "segmentPrompt": "SEGMENT 15 (01:52-02:00)\nNarrative mode: performance\nIntensity: 0.74\nScript (do not render as on-screen text):\n[Final Chorus]\nSomething\u2019s moving under my skin\nCrawling out when the dark drags in\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "01:52-02:00"
+    },
+    {
+      "intensity": 0.7894736842105263,
+      "scriptLines": "I\u2019m afraid of the things I want\nI\u2019m afraid when I still feel nothing\nAfraid when I feel too deep",
+      "segmentNumber": 16,
+      "segmentPrompt": "SEGMENT 16 (02:00-02:08)\nNarrative mode: performance\nIntensity: 0.79\nScript (do not render as on-screen text):\nI\u2019m afraid of the things I want\nI\u2019m afraid when I still feel nothing\nAfraid when I feel too deep\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "02:00-02:08"
+    },
+    {
+      "intensity": 0.8421052631578947,
+      "scriptLines": "Pull me deeper under my skin\nTill I blur at the edges, paper thin\nEvery fear that I outrun",
+      "segmentNumber": 17,
+      "segmentPrompt": "SEGMENT 17 (02:08-02:16)\nNarrative mode: performance\nIntensity: 0.84\nScript (do not render as on-screen text):\nPull me deeper under my skin\nTill I blur at the edges, paper thin\nEvery fear that I outrun\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "02:08-02:16"
+    },
+    {
+      "intensity": 0.8947368421052632,
+      "scriptLines": "Was just waiting, waiting in me",
+      "segmentNumber": 18,
+      "segmentPrompt": "SEGMENT 18 (02:16-02:24)\nNarrative mode: performance\nIntensity: 0.89\nScript (do not render as on-screen text):\nWas just waiting, waiting in me\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "02:16-02:24"
+    },
+    {
+      "intensity": 0.9473684210526315,
+      "scriptLines": "",
+      "segmentNumber": 19,
+      "segmentPrompt": "SEGMENT 19 (02:24-02:32)\nNarrative mode: performance\nIntensity: 0.95\nScript (do not render as on-screen text):\n\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "02:24-02:32"
+    },
+    {
+      "intensity": 1.0,
+      "scriptLines": "",
+      "segmentNumber": 20,
+      "segmentPrompt": "SEGMENT 20 (02:32-02:36)\nNarrative mode: performance\nIntensity: 1.00\nScript (do not render as on-screen text):\n\nDirection: Maintain continuity with prior segment. No on-screen text or UI artifacts.",
+      "timestamp": "02:32-02:36"
+    }
+  ]
+}
