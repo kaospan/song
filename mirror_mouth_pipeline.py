@@ -211,6 +211,36 @@ def get_headers(content_type=None):
     return headers
 
 
+def request_with_retries(method, url, retry_statuses=None, **kwargs):
+    retry_statuses = retry_statuses or {408, 429, 500, 502, 503, 504}
+    for attempt in range(1, REQUEST_RETRY_LIMIT + 1):
+        try:
+            resp = http_session().request(method, url, **kwargs)
+        except requests.exceptions.RequestException as exc:
+            if attempt >= REQUEST_RETRY_LIMIT:
+                raise
+            retry_delay = min(REQUEST_RETRY_BACKOFF_SECONDS * attempt, 60)
+            print(
+                "Request failed "
+                f"({attempt}/{REQUEST_RETRY_LIMIT}): {exc}. "
+                f"Retrying in {retry_delay} seconds..."
+            )
+            time.sleep(retry_delay)
+            continue
+
+        if resp.status_code in retry_statuses and attempt < REQUEST_RETRY_LIMIT:
+            retry_delay = min(REQUEST_RETRY_BACKOFF_SECONDS * attempt, 60)
+            print(
+                "Request returned "
+                f"{resp.status_code} ({attempt}/{REQUEST_RETRY_LIMIT}). "
+                f"Retrying in {retry_delay} seconds..."
+            )
+            time.sleep(retry_delay)
+            continue
+
+        return resp
+
+
 def _is_presigned_s3_url(url):
     if not url:
         return False
@@ -571,7 +601,13 @@ def create_asset_record(name, type_="image"):
     payload = {"name": name, "type": type_}
     headers = get_headers("application/json")
 
-    resp = http_session().post(url, headers=headers, json=payload, timeout=30)
+    resp = request_with_retries(
+        "POST",
+        url,
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
     if not resp.ok:
         raise_with_body(resp)
 
@@ -583,7 +619,13 @@ def upload_file_to_asset(asset_id, path, mime="application/octet-stream"):
 
     with open(path, "rb") as f:
         files = {"file": (os.path.basename(path), f, mime)}
-        resp = http_session().post(url, headers=get_headers(), files=files, timeout=120)
+        resp = request_with_retries(
+            "POST",
+            url,
+            headers=get_headers(),
+            files=files,
+            timeout=120,
+        )
 
     if not resp.ok:
         raise_with_body(resp)
@@ -613,7 +655,12 @@ def upload_asset(path, name=None, mime=None, type_="image"):
     if upload_url:
         print(f"Uploading to presigned URL for asset {asset_id}")
         with open(path, "rb") as f:
-            put_resp = http_session().put(upload_url, data=f, timeout=120)
+            put_resp = request_with_retries(
+                "PUT",
+                upload_url,
+                data=f,
+                timeout=120,
+            )
         if not put_resp.ok:
             raise_with_body(put_resp)
     else:
